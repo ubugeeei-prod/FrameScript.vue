@@ -56,6 +56,10 @@ const notifyGlobal = () => {
 
 const getGlobalClips = () => globalClips
 
+export const subscribeTimelineGlobal = subscribeGlobal
+
+export const getTimelineClipsSnapshot = getGlobalClips
+
 /**
  * Registers a clip in the global timeline store.
  *
@@ -108,6 +112,8 @@ export const setClipVisibilityGlobal = (id: string, visible: boolean) => {
 }
 
 const getGlobalHidden = () => globalHidden
+
+export const getTimelineHiddenSnapshot = getGlobalHidden
 
 /**
  * Provides timeline registration context for clips.

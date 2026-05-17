@@ -41,7 +41,8 @@
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-router-dom": "^6.28.0",
-    "three": "^0.166.1"
+    "three": "^0.166.1",
+    "vue": "^3.5.34"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
@@ -50,6 +51,7 @@
     "@types/react-dom": "^19.2.3",
     "@types/three": "^0.166.0",
     "@vitejs/plugin-react": "^5.1.1",
+    "@vitejs/plugin-vue": "^6.0.7",
     "@webgpu/types": "^0.1.67",
     "concurrently": "^9.2.1",
     "cross-env": "^10.1.0",

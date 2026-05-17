@@ -5,37 +5,42 @@ sidebar_position: 2
 
 ## Basic structure
 
-Your project lives in `project/project.tsx`.
-You build the video by adding elements here.
+Write your video in `project/project.vue`.
+`project/project.tsx` is only a compatibility wrapper that mounts the SFC into FrameScript Studio and the renderer.
+
+```vue
+<script setup lang="ts">
+import { Clip, Project, TimeLine, Video } from "../src/lib/vue"
+</script>
+
+<template>
+  <Project>
+    <TimeLine>
+      <Clip label="Clip Name">
+        <Video video="~/Videos/example.mp4" />
+      </Clip>
+    </TimeLine>
+  </Project>
+</template>
+```
+
+Project settings still live in `project/project.tsx` because FrameScript core modules read them at build time.
 
 ```tsx
-import { Clip } from "../src/lib/clip"
-import { Project, type ProjectSettings } from "../src/lib/project"
-import { TimeLine } from "../src/lib/timeline"
-import { Video } from "../src/lib/video/video"
+import { VueProjectRoot } from "../src/lib/vue"
+import type { ProjectSettings } from "../src/lib/project"
+import ProjectVue from "./project.vue"
 
-// Project settings
 export const PROJECT_SETTINGS: ProjectSettings = {
-  name: "framescript-minimal",
+  name: "framescript-vue-template",
   width: 1920,
   height: 1080,
   fps: 60,
 }
 
-// Project definition
-// Add elements here to build the video
 export const PROJECT = () => {
   return (
-    <Project>
-      <TimeLine>
-        {/* <Clip> is a timeline segment */}
-        {/* Timeline length follows <Video/> by default (can be overridden) */}
-        <Clip label="Clip Name">
-          {/* <Video/> loads a video file */}
-          <Video video={{ path: "~/Videos/example.mp4" }} />
-        </Clip>
-      </TimeLine>
-    </Project>
+    <VueProjectRoot component={ProjectVue} projectSettings={PROJECT_SETTINGS} />
   )
 }
 ```

@@ -3,8 +3,8 @@ title: FrameScript ドキュメント
 sidebar_position: 1
 ---
 
-FrameScript は React / CSS で描画する、コードファーストな モーショングラフィックス & 動画編集 基盤です。
-React コンポーネントとしてシーンを記述し、Studio でプレビューし、ヘッドレス Chromium で書き出します。
+FrameScript.vue は Vue SFC / CSS で描画する、コードファーストな モーショングラフィックス & 動画編集 基盤です。
+`.vue` ファイルとしてシーンを記述し、Studio でプレビューし、ヘッドレス Chromium で書き出します。
 
 ## クイックスタート
 
@@ -42,4 +42,4 @@ FrameScript Studio が立ち上がります。
 
 ### プロジェクトを編集
 
-プロジェクトは `project/project.tsx` に記述されています。
+主に編集するプロジェクトは `project/project.vue` に記述されています。

@@ -12,22 +12,10 @@ import {
   type Video,
   type VideoResolvedTrimProps,
 } from "./video"
+import { registerCanvasFrameWaiter } from "./canvas-frame-registry"
 
 // Track pending frame draws so headless callers can await completion.
 const pendingFramePromises = new Set<Promise<void>>()
-const waitCanvasFrameCallbacks = new Map<
-  string,
-  (frame: number) => Promise<void>
->()
-const updateGlobalWaitCanvasFrame = () => {
-  if (typeof window === "undefined") return
-  const api = ((window as any).__frameScript ||= {})
-  api.waitCanvasFrame = async (frame: number) => {
-    const callbacks = Array.from(waitCanvasFrameCallbacks.values())
-    if (callbacks.length === 0) return
-    await Promise.all(callbacks.map((cb) => cb(frame)))
-  }
-}
 
 const trackPending = (manual: ManualPromise<void>) => {
   pendingFramePromises.add(manual.promise)
@@ -426,16 +414,11 @@ export const VideoCanvasRender = ({
     }
 
     const id = waitCanvasIdRef.current
-    if (visible) {
-      waitCanvasFrameCallbacks.set(id, waitCanvasFrame)
-    } else {
-      waitCanvasFrameCallbacks.delete(id)
-    }
-    updateGlobalWaitCanvasFrame()
+    if (!visible) return
+    const unregister = registerCanvasFrameWaiter(id, waitCanvasFrame)
 
     return () => {
-      waitCanvasFrameCallbacks.delete(id)
-      updateGlobalWaitCanvasFrame()
+      unregister()
     }
   }, [clipStart, createOrGetFramePromise, durationFrames, visible])
 
