@@ -92,6 +92,10 @@ type RenderStartPayload = {
   ffmpegLowMemory: boolean
 }
 
+function clearBackendHealth() {
+  backendHealthyPromise = null
+}
+
 function getPlatformKey() {
   if (process.platform === "linux" && process.arch === "x64")
     return "linux-x86_64"
@@ -186,9 +190,15 @@ function startBackend(): Promise<void> {
     console.error("[backend stderr]", data.toString())
   })
 
+  backendProcess.on("error", (error) => {
+    console.error("[backend error]", error)
+    clearBackendHealth()
+  })
+
   backendProcess.on("exit", (code, signal) => {
     console.log(`[backend exited] code=${code} signal=${signal}`)
     backendProcess = null
+    clearBackendHealth()
   })
 
   return Promise.resolve()
@@ -209,8 +219,15 @@ async function waitForHealthz(): Promise<void> {
     const started = Date.now()
     const timeoutMs = 15_000
     const intervalMs = 300
+    let timer: NodeJS.Timeout
 
-    const timer = setInterval(() => {
+    const fail = (error: Error) => {
+      clearInterval(timer)
+      clearBackendHealth()
+      reject(error)
+    }
+
+    timer = setInterval(() => {
       fetch(healthUrl)
         .then((res) => {
           if (res.ok) {
@@ -223,8 +240,7 @@ async function waitForHealthz(): Promise<void> {
         })
 
       if (Date.now() - started > timeoutMs) {
-        clearInterval(timer)
-        reject(new Error("healthz timeout"))
+        fail(new Error("healthz timeout"))
       }
     }, intervalMs)
   })
