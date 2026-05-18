@@ -37,9 +37,7 @@ fn resolve_with_cache(
                 *cached = Some(path.clone());
                 Ok(path)
             } else {
-                Err(format!(
-                    "{name} not found on PATH and {env_var} is not set"
-                ))
+                Err(format!("{name} not found on PATH and {env_var} is not set"))
             }
         }
         Err(error) => Err(format!("failed to run {name}: {error}")),
