@@ -42,10 +42,14 @@ import {
   registerClipGlobal,
   subscribeTimelineGlobal,
   unregisterClipGlobal,
+  useClipVisibilityState as useReactClipVisibilityState,
+  useTimelineRegistration as useReactTimelineRegistration,
 } from "./timeline"
 import {
+  type AudioSegment,
   registerAudioSegmentGlobal,
   unregisterAudioSegmentGlobal,
+  useAudioPlanRegistration as useReactAudioPlanRegistration,
 } from "./audio-plan"
 import { useIsPlaying, useIsRender } from "./studio-state"
 import { resolveTrimFrames } from "./trim"
@@ -53,6 +57,8 @@ import type { Trim } from "./trim"
 import { createManualPromise } from "../util/promise"
 import type { ManualPromise } from "../util/promise"
 import { registerCanvasFrameWaiter } from "./video/canvas-frame-registry"
+import { backendFetch, backendWebSocketUrl, buildBackendUrl } from "./backend"
+import { trackMediaMetadataPromise } from "./media-metadata"
 
 export { seconds } from "./frame"
 
@@ -73,6 +79,11 @@ export type FrameScriptVueContext = DurationReporter & {
   isPlaying: boolean
   isRender: boolean
   projectSettings: ProjectSettings
+  timelineHidden: Record<string, boolean>
+  registerClip: typeof registerClipGlobal
+  unregisterClip: typeof unregisterClipGlobal
+  registerAudioSegment: (segment: AudioSegment) => void
+  unregisterAudioSegment: (id: string) => void
 }
 
 export const FrameScriptVueContextKey: InjectionKey<FrameScriptVueContext> =
@@ -84,6 +95,14 @@ const createVueId = (prefix: string) => `${prefix}-${nextVueId++}`
 const noopDurationReporter: DurationReporter = {
   reportDuration: () => {},
   removeDuration: () => {},
+}
+
+const defaultRegistrations = {
+  timelineHidden: getTimelineHiddenSnapshot(),
+  registerClip: registerClipGlobal,
+  unregisterClip: unregisterClipGlobal,
+  registerAudioSegment: registerAudioSegmentGlobal,
+  unregisterAudioSegment: unregisterAudioSegmentGlobal,
 }
 
 const createRuntimeContext = (
@@ -101,6 +120,7 @@ const createRuntimeContext = (
     isRender: false,
     projectSettings: settings,
     ...noopDurationReporter,
+    ...defaultRegistrations,
   }) as FrameScriptVueContext
 
 const assignRuntime = (
@@ -267,6 +287,10 @@ export function VueProjectRoot<
   const globalFrame = useReactGlobalCurrentFrame()
   const isPlaying = useIsPlaying()
   const isRender = useIsRender()
+  const timelineRegistration = useReactTimelineRegistration()
+  const { hiddenMap } = useReactClipVisibilityState()
+  const { registerAudioSegment, unregisterAudioSegment } =
+    useReactAudioPlanRegistration()
   const runtimeRef = useRef<FrameScriptVueContext | null>(null)
 
   if (!runtimeRef.current) {
@@ -287,9 +311,25 @@ export function VueProjectRoot<
       isPlaying,
       isRender,
       projectSettings,
+      timelineHidden: hiddenMap,
+      registerClip: timelineRegistration.registerClip,
+      unregisterClip: timelineRegistration.unregisterClip,
+      registerAudioSegment,
+      unregisterAudioSegment,
       ...noopDurationReporter,
     })
-  }, [currentFrame, globalFrame, isPlaying, isRender, projectSettings, runtime])
+  }, [
+    currentFrame,
+    globalFrame,
+    hiddenMap,
+    isPlaying,
+    isRender,
+    projectSettings,
+    registerAudioSegment,
+    runtime,
+    timelineRegistration,
+    unregisterAudioSegment,
+  ])
 
   const mountRef = useMountedVueComponent({
     component,
@@ -341,6 +381,10 @@ export function VueScene<
   const clipActive = useReactClipActive()
   const isPlaying = useIsPlaying()
   const isRender = useIsRender()
+  const timelineRegistration = useReactTimelineRegistration()
+  const { hiddenMap } = useReactClipVisibilityState()
+  const { registerAudioSegment, unregisterAudioSegment } =
+    useReactAudioPlanRegistration()
   const durationReportsRef = useRef<Map<string, number>>(new Map())
   const [reportedDuration, setReportedDuration] = useState(0)
   const runtimeRef = useRef<FrameScriptVueContext | null>(null)
@@ -387,6 +431,11 @@ export function VueScene<
       isPlaying,
       isRender,
       projectSettings,
+      timelineHidden: hiddenMap,
+      registerClip: timelineRegistration.registerClip,
+      unregisterClip: timelineRegistration.unregisterClip,
+      registerAudioSegment,
+      unregisterAudioSegment,
       ...durationReporter,
     })
   }, [
@@ -397,10 +446,14 @@ export function VueScene<
     currentFrame,
     durationReporter,
     globalFrame,
+    hiddenMap,
     isPlaying,
     isRender,
     projectSettings,
+    registerAudioSegment,
     runtime,
+    timelineRegistration,
+    unregisterAudioSegment,
   ])
 
   const mountRef = useMountedVueComponent({
@@ -421,10 +474,16 @@ export function VueScene<
 }
 
 const useTimelineHiddenMap = () => {
+  const context = useFrameScript()
   const hidden = ref(getTimelineHiddenSnapshot())
   let unsubscribe: (() => void) | null = null
 
+  watchEffect(() => {
+    hidden.value = context.timelineHidden
+  })
+
   onMounted(() => {
+    if (context.registerClip !== registerClipGlobal) return
     unsubscribe = subscribeTimelineGlobal(() => {
       hidden.value = getTimelineHiddenSnapshot()
     })
@@ -547,12 +606,7 @@ export const Clip = defineComponent({
       Math.max(absoluteStart.value, parentStart.value),
     )
     const clampedEnd = computed(() =>
-      Math.min(
-        absoluteEnd.value < absoluteStart.value
-          ? absoluteStart.value
-          : absoluteEnd.value,
-        parentEnd.value,
-      ),
+      Math.min(absoluteEnd.value, parentEnd.value),
     )
     const hasSpan = computed(() => clampedEnd.value >= clampedStart.value)
     const ownVisible = computed(() => !hiddenMap.value[id])
@@ -575,6 +629,11 @@ export const Clip = defineComponent({
       isPlaying: parent.isPlaying,
       isRender: parent.isRender,
       projectSettings: parent.projectSettings,
+      timelineHidden: parent.timelineHidden,
+      registerClip: parent.registerClip,
+      unregisterClip: parent.unregisterClip,
+      registerAudioSegment: parent.registerAudioSegment,
+      unregisterAudioSegment: parent.unregisterAudioSegment,
       ...ownDurationReporter,
     }) as FrameScriptVueContext
 
@@ -592,6 +651,11 @@ export const Clip = defineComponent({
         isPlaying: parent.isPlaying,
         isRender: parent.isRender,
         projectSettings: parent.projectSettings,
+        timelineHidden: parent.timelineHidden,
+        registerClip: parent.registerClip,
+        unregisterClip: parent.unregisterClip,
+        registerAudioSegment: parent.registerAudioSegment,
+        unregisterAudioSegment: parent.unregisterAudioSegment,
         ...ownDurationReporter,
       })
     })
@@ -600,7 +664,7 @@ export const Clip = defineComponent({
 
     watchEffect((onCleanup) => {
       if (!hasSpan.value) return
-      registerClipGlobal({
+      parent.registerClip({
         id,
         start: clampedStart.value,
         end: clampedEnd.value,
@@ -609,7 +673,7 @@ export const Clip = defineComponent({
         parentId: parent.clipId,
         laneId: props.laneId,
       })
-      onCleanup(() => unregisterClipGlobal(id))
+      onCleanup(() => parent.unregisterClip(id))
     })
 
     const collectAnimations = () => {
@@ -723,95 +787,123 @@ const normalizeRequiredVideo = (
 ): VideoSource => normalizeVideo(video ?? "")
 
 const buildVideoUrl = (video: VideoSource) => {
-  const url = new URL("http://localhost:3000/video")
-  url.searchParams.set("path", video.path)
-  return url.toString()
+  return buildBackendUrl("video", { path: video.path })
 }
 
 const buildVideoMetaUrl = (video: VideoSource) => {
-  const url = new URL("http://localhost:3000/video/meta")
-  url.searchParams.set("path", video.path)
-  return url.toString()
+  return buildBackendUrl("video/meta", { path: video.path })
 }
 
-const fetchVideoMetaSync = (video: VideoSource): VideoMeta => {
+const emptyVideoMeta: VideoMeta = {
+  duration_ms: 0,
+  fps: 0,
+  frame_count: 0,
+  width: 0,
+  height: 0,
+}
+
+const normalizeVideoMetaPayload = (payload: Partial<VideoMeta>): VideoMeta => ({
+  duration_ms:
+    typeof payload.duration_ms === "number"
+      ? Math.max(0, payload.duration_ms)
+      : 0,
+  fps: typeof payload.fps === "number" ? payload.fps : 0,
+  frame_count:
+    typeof payload.frame_count === "number"
+      ? Math.max(0, Math.round(payload.frame_count))
+      : 0,
+  width:
+    typeof payload.width === "number"
+      ? Math.max(0, Math.round(payload.width))
+      : 0,
+  height:
+    typeof payload.height === "number"
+      ? Math.max(0, Math.round(payload.height))
+      : 0,
+})
+
+const videoMetaPending = new Map<string, Promise<VideoMeta | null>>()
+
+const fetchVideoMetaAsync = async (
+  video: VideoSource,
+): Promise<VideoMeta | null> => {
   const cached = videoMetaCache.get(video.path)
   if (cached) return cached
 
-  const fallback: VideoMeta = {
-    duration_ms: 0,
-    fps: 0,
-    frame_count: 0,
-    width: 0,
-    height: 0,
-  }
+  const pending = videoMetaPending.get(video.path)
+  if (pending) return pending
 
-  try {
-    const xhr = new XMLHttpRequest()
-    xhr.open("GET", buildVideoMetaUrl(video), false)
-    xhr.send()
-
-    if (xhr.status >= 200 && xhr.status < 300) {
-      const payload = JSON.parse(xhr.responseText) as Partial<VideoMeta>
-      const meta: VideoMeta = {
-        duration_ms:
-          typeof payload.duration_ms === "number"
-            ? Math.max(0, payload.duration_ms)
-            : 0,
-        fps: typeof payload.fps === "number" ? payload.fps : 0,
-        frame_count:
-          typeof payload.frame_count === "number"
-            ? Math.max(0, Math.round(payload.frame_count))
-            : 0,
-        width:
-          typeof payload.width === "number"
-            ? Math.max(0, Math.round(payload.width))
-            : 0,
-        height:
-          typeof payload.height === "number"
-            ? Math.max(0, Math.round(payload.height))
-            : 0,
-      }
+  const next = trackMediaMetadataPromise(
+    (async () => {
+      const res = await backendFetch(buildVideoMetaUrl(video))
+      if (!res.ok) return null
+      const meta = normalizeVideoMetaPayload(
+        (await res.json()) as Partial<VideoMeta>,
+      )
       videoMetaCache.set(video.path, meta)
       return meta
-    }
-  } catch (error) {
-    console.error("fetchVideoMetaSync(): failed to fetch metadata", error)
-  }
+    })(),
+  )
+    .catch((error) => {
+      console.error("fetchVideoMetaAsync(): failed to fetch metadata", error)
+      return null
+    })
+    .finally(() => {
+      videoMetaPending.delete(video.path)
+    })
 
-  videoMetaCache.set(video.path, fallback)
-  return fallback
+  videoMetaPending.set(video.path, next)
+  return next
 }
 
-const videoLength = (video: VideoSource | string, projectFps: number) => {
-  const resolved = normalizeVideo(video)
-  const meta = fetchVideoMetaSync(resolved)
-  if (meta.frame_count > 0 && meta.fps > 0) {
-    return Math.round((meta.frame_count * projectFps) / meta.fps)
-  }
-  const seconds = meta.duration_ms > 0 ? meta.duration_ms / 1000 : 0
-  return Math.round(seconds * projectFps)
+const cachedVideoMeta = (video: VideoSource): VideoMeta => {
+  const cached = videoMetaCache.get(video.path)
+  if (cached) return cached
+  void fetchVideoMetaAsync(video)
+  return emptyVideoMeta
 }
 
 export const video_fps = (video: VideoSource | string) => {
   const resolved = normalizeVideo(video)
-  return fetchVideoMetaSync(resolved).fps
+  return cachedVideoMeta(resolved).fps
 }
 
 export const video_frame_count = (video: VideoSource | string) => {
   const resolved = normalizeVideo(video)
-  return fetchVideoMetaSync(resolved).frame_count
+  return cachedVideoMeta(resolved).frame_count
 }
 
 export const video_dimensions = (video: VideoSource | string) => {
   const resolved = normalizeVideo(video)
-  const meta = fetchVideoMetaSync(resolved)
+  const meta = cachedVideoMeta(resolved)
   return { width: meta.width, height: meta.height }
 }
 
 const trackPending = (manual: ManualPromise<void>) => {
   pendingFramePromises.add(manual.promise)
   manual.promise.finally(() => pendingFramePromises.delete(manual.promise))
+}
+
+const useVueVideoMeta = (video: { value: VideoSource }) => {
+  const meta = ref<VideoMeta>(cachedVideoMeta(video.value))
+  watchEffect((onCleanup) => {
+    const source = video.value
+    const cached = videoMetaCache.get(source.path)
+    if (cached) {
+      meta.value = cached
+      return
+    }
+
+    let cancelled = false
+    meta.value = emptyVideoMeta
+    void fetchVideoMetaAsync(source).then((next) => {
+      if (!cancelled && next) meta.value = next
+    })
+    onCleanup(() => {
+      cancelled = true
+    })
+  })
+  return meta
 }
 
 const videoProp = {
@@ -940,10 +1032,20 @@ const VideoCanvasRender = defineComponent({
     let requestedFrame: number | null = null
 
     const resolved = computed(() => normalizeRequiredVideo(props.video))
-    const fps = computed(() => video_fps(resolved.value))
-    const sourceFrameCount = computed(() => video_frame_count(resolved.value))
+    const videoMeta = useVueVideoMeta(resolved)
+    const fps = computed(() => videoMeta.value.fps)
+    const sourceFrameCount = computed(() => videoMeta.value.frame_count)
     const rawDurationFrames = computed(() =>
-      videoLength(resolved.value, context.projectSettings.fps),
+      videoMeta.value.frame_count > 0 && videoMeta.value.fps > 0
+        ? Math.round(
+            (videoMeta.value.frame_count * context.projectSettings.fps) /
+              videoMeta.value.fps,
+          )
+        : Math.round(
+            (videoMeta.value.duration_ms > 0
+              ? videoMeta.value.duration_ms / 1000
+              : 0) * context.projectSettings.fps,
+          ),
     )
     const durationFrames = computed(() =>
       Math.max(
@@ -1137,7 +1239,7 @@ const VideoCanvasRender = defineComponent({
 
         const connect = () => {
           if (ws) return
-          const socket = new WebSocket("ws://localhost:3000/ws")
+          const socket = new WebSocket(backendWebSocketUrl("ws"))
           socket.binaryType = "arraybuffer"
           ws = socket
 
@@ -1248,6 +1350,7 @@ const VideoCanvasRender = defineComponent({
           const clampedFrame = Math.min(Math.max(relativeFrame, 0), maxFrame)
           if (lastDrawnFrame != null && lastDrawnFrame >= clampedFrame) return
 
+          sendFrameRequest(clampedFrame)
           await createOrGetFramePromise(clampedFrame).promise
         },
       )
@@ -1286,8 +1389,18 @@ export const Video = defineComponent({
     const context = useFrameScript()
     const id = createVueId("vue-video-audio")
     const resolvedVideo = computed(() => normalizeRequiredVideo(props.video))
+    const videoMeta = useVueVideoMeta(resolvedVideo)
     const rawDurationFrames = computed(() =>
-      videoLength(resolvedVideo.value, context.projectSettings.fps),
+      videoMeta.value.frame_count > 0 && videoMeta.value.fps > 0
+        ? Math.round(
+            (videoMeta.value.frame_count * context.projectSettings.fps) /
+              videoMeta.value.fps,
+          )
+        : Math.round(
+            (videoMeta.value.duration_ms > 0
+              ? videoMeta.value.duration_ms / 1000
+              : 0) * context.projectSettings.fps,
+          ),
     )
     const trimFrames = computed(() =>
       resolveTrimFrames({
@@ -1306,7 +1419,7 @@ export const Video = defineComponent({
     const resolvedStyle = computed(() => {
       const style = cssObject(props.style)
       if (style.aspectRatio != null) return style
-      const { width, height } = video_dimensions(resolvedVideo.value)
+      const { width, height } = videoMeta.value
       if (width <= 0 || height <= 0) return style
       return {
         ...style,
@@ -1329,7 +1442,7 @@ export const Video = defineComponent({
       const clampedDuration = Math.min(clipDurationFrames, availableFrames)
       if (clampedDuration <= 0) return
 
-      registerAudioSegmentGlobal({
+      context.registerAudioSegment({
         id,
         source: { kind: "video", path: resolvedVideo.value.path },
         clipId: context.clipId ?? undefined,
@@ -1339,7 +1452,7 @@ export const Video = defineComponent({
         showWaveform: props.showWaveform,
       })
 
-      onCleanup(() => unregisterAudioSegmentGlobal(id))
+      onCleanup(() => context.unregisterAudioSegment(id))
     })
 
     return () =>

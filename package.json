@@ -22,11 +22,14 @@
     "build": "npm run build:app && npm run build:render",
     "build:all": "npm run build",
     "build:binaries": "node ./scripts/build-binaries.mjs",
+    "smoke:backend": "node ./scripts/smoke-backend.mjs",
+    "lint": "eslint .",
+    "test": "vitest run --config vite.studio.config.ts",
     "typecheck": "tsc -p tsconfig.app.json --noEmit --pretty false && tsc -p tsconfig.node.json --noEmit --pretty false && tsc -p tsconfig.electron.json --noEmit --pretty false",
     "predev:electron:bin": "tsc -p tsconfig.electron.json",
     "dev:electron:bin": "wait-on http://localhost:5173 http://localhost:5174/render && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 RENDER_DEV_SERVER_URL=http://localhost:5174/render FRAMESCRIPT_RUN_MODE=bin electron ./dist-electron/main.js",
     "dev:bin": "concurrently -k \"npm:dev:vite\" \"npm:dev:render\" \"npm:dev:electron:bin\"",
-    "start": "npm run dev:bin",
+    "start": "npm run dev",
     "start:bin": "npm run build:all && npm run build:binaries && node ./scripts/start-bin.mjs",
     "start:bin:skip-build": "node ./scripts/start-bin.mjs",
     "docs:start": "npm --prefix docs run start",
@@ -71,6 +74,7 @@
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.46.4",
     "vite": "^7.2.4",
+    "vitest": "^4.1.6",
     "wait-on": "^9.0.3"
   }
 }

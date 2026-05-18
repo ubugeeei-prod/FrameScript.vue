@@ -1,10 +1,4 @@
-import React, {
-  useCallback,
-  useContext,
-  useMemo,
-  useState,
-  useSyncExternalStore,
-} from "react"
+import React, { useContext, useMemo, useRef, useSyncExternalStore } from "react"
 
 type TimeLineProps = {
   children?: React.ReactNode
@@ -41,24 +35,93 @@ const TimelineContext = React.createContext<TimelineContextValue | null>(null)
 
 type Listener = () => void
 
-let globalClips: TimelineClip[] = []
-let globalHidden: Record<string, boolean> = {}
-const globalListeners = new Set<Listener>()
-
-const subscribeGlobal = (listener: Listener) => {
-  globalListeners.add(listener)
-  return () => globalListeners.delete(listener)
+type TimelineStore = {
+  getClips: () => TimelineClip[]
+  getHidden: () => Record<string, boolean>
+  subscribe: (listener: Listener) => () => void
+  registerClip: (clip: TimelineClip) => void
+  unregisterClip: (id: string) => void
+  setClipVisibility: (id: string, visible: boolean) => void
+  clear: () => void
 }
 
-const notifyGlobal = () => {
-  globalListeners.forEach((listener) => listener())
+const createTimelineStore = (): TimelineStore => {
+  let clips: TimelineClip[] = []
+  let hidden: Record<string, boolean> = {}
+  const listeners = new Set<Listener>()
+
+  const notify = () => {
+    listeners.forEach((listener) => listener())
+  }
+
+  return {
+    getClips: () => clips,
+    getHidden: () => hidden,
+    subscribe: (listener) => {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+    registerClip: (clip) => {
+      clips = [...clips.filter((item) => item.id !== clip.id), clip]
+      notify()
+    },
+    unregisterClip: (id) => {
+      clips = clips.filter((clip) => clip.id !== id)
+      if (hidden[id]) {
+        const { [id]: _removed, ...rest } = hidden
+        hidden = rest
+      }
+      notify()
+    },
+    setClipVisibility: (id, visible) => {
+      if (visible) {
+        const { [id]: _removed, ...rest } = hidden
+        hidden = rest
+      } else {
+        hidden = { ...hidden, [id]: true }
+      }
+      notify()
+    },
+    clear: () => {
+      clips = []
+      hidden = {}
+      notify()
+    },
+  }
 }
 
-const getGlobalClips = () => globalClips
+const defaultTimelineStore = createTimelineStore()
+const TimelineStoreContext = React.createContext<TimelineStore | null>(null)
 
-export const subscribeTimelineGlobal = subscribeGlobal
+export const TimelineStoreProvider = ({
+  children,
+}: {
+  children: React.ReactNode
+}) => {
+  const existing = useContext(TimelineStoreContext)
+  const storeRef = useRef<TimelineStore | null>(null)
+  if (!storeRef.current) {
+    storeRef.current = createTimelineStore()
+  }
+  const store = storeRef.current
 
-export const getTimelineClipsSnapshot = getGlobalClips
+  React.useEffect(() => () => store.clear(), [store])
+
+  if (existing) return <>{children}</>
+
+  return (
+    <TimelineStoreContext.Provider value={store}>
+      {children}
+    </TimelineStoreContext.Provider>
+  )
+}
+
+const useTimelineStore = () =>
+  useContext(TimelineStoreContext) ?? defaultTimelineStore
+
+export const subscribeTimelineGlobal = defaultTimelineStore.subscribe
+
+export const getTimelineClipsSnapshot = defaultTimelineStore.getClips
 
 /**
  * Registers a clip in the global timeline store.
@@ -71,8 +134,7 @@ export const getTimelineClipsSnapshot = getGlobalClips
  * ```
  */
 export const registerClipGlobal = (clip: TimelineClip) => {
-  globalClips = [...globalClips.filter((item) => item.id !== clip.id), clip]
-  notifyGlobal()
+  defaultTimelineStore.registerClip(clip)
 }
 
 /**
@@ -86,9 +148,7 @@ export const registerClipGlobal = (clip: TimelineClip) => {
  * ```
  */
 export const unregisterClipGlobal = (id: string) => {
-  globalClips = globalClips.filter((clip) => clip.id !== id)
-  delete globalHidden[id]
-  notifyGlobal()
+  defaultTimelineStore.unregisterClip(id)
 }
 
 /**
@@ -102,18 +162,10 @@ export const unregisterClipGlobal = (id: string) => {
  * ```
  */
 export const setClipVisibilityGlobal = (id: string, visible: boolean) => {
-  if (visible) {
-    const { [id]: _, ...rest } = globalHidden
-    globalHidden = rest
-  } else {
-    globalHidden = { ...globalHidden, [id]: true }
-  }
-  notifyGlobal()
+  defaultTimelineStore.setClipVisibility(id, visible)
 }
 
-const getGlobalHidden = () => globalHidden
-
-export const getTimelineHiddenSnapshot = getGlobalHidden
+export const getTimelineHiddenSnapshot = defaultTimelineStore.getHidden
 
 /**
  * Provides timeline registration context for clips.
@@ -128,39 +180,17 @@ export const getTimelineHiddenSnapshot = getGlobalHidden
  * ```
  */
 export const TimeLine = ({ children }: TimeLineProps) => {
-  const existingContext = useContext(TimelineContext)
-  const [clips, setClips] = useState<TimelineClip[]>([])
-
-  const registerClip = useCallback((clip: TimelineClip) => {
-    setClips((prev) => {
-      const next = prev.filter((item) => item.id !== clip.id)
-      return [...next, clip]
-    })
-    registerClipGlobal(clip)
-  }, [])
-
-  const unregisterClip = useCallback((id: string) => {
-    setClips((prev) => prev.filter((clip) => clip.id !== id))
-    unregisterClipGlobal(id)
-  }, [])
-
-  const setClipVisibility = useCallback((id: string, visible: boolean) => {
-    setClipVisibilityGlobal(id, visible)
-  }, [])
-
+  const store = useTimelineStore()
+  const clips = useSyncExternalStore(store.subscribe, store.getClips)
   const value = useMemo(
     () => ({
       clips,
-      registerClip,
-      unregisterClip,
-      setClipVisibility,
+      registerClip: store.registerClip,
+      unregisterClip: store.unregisterClip,
+      setClipVisibility: store.setClipVisibility,
     }),
-    [clips, registerClip, unregisterClip, setClipVisibility],
+    [clips, store],
   )
-
-  if (existingContext) {
-    return <>{children}</>
-  }
 
   return (
     <TimelineContext.Provider value={value}>
@@ -181,7 +211,8 @@ export const TimeLine = ({ children }: TimeLineProps) => {
  */
 export const useTimelineClips = () => {
   const context = useContext(TimelineContext)
-  const clips = useSyncExternalStore(subscribeGlobal, getGlobalClips)
+  const store = useTimelineStore()
+  const clips = useSyncExternalStore(store.subscribe, store.getClips)
   if (context) {
     return context.clips
   }
@@ -199,7 +230,18 @@ export const useTimelineClips = () => {
  * ```
  */
 export const useTimelineRegistration = () => {
-  return useContext(TimelineContext)
+  const context = useContext(TimelineContext)
+  const store = useTimelineStore()
+  return useMemo(
+    () =>
+      context ?? {
+        clips: store.getClips(),
+        registerClip: store.registerClip,
+        unregisterClip: store.unregisterClip,
+        setClipVisibility: store.setClipVisibility,
+      },
+    [context, store],
+  )
 }
 
 /**
@@ -214,7 +256,8 @@ export const useTimelineRegistration = () => {
  */
 export const useClipVisibilityState = () => {
   const context = useContext(TimelineContext)
-  const hidden = useSyncExternalStore(subscribeGlobal, getGlobalHidden)
+  const store = useTimelineStore()
+  const hidden = useSyncExternalStore(store.subscribe, store.getHidden)
 
   if (context) {
     return {
@@ -225,7 +268,7 @@ export const useClipVisibilityState = () => {
 
   return {
     hiddenMap: hidden,
-    setClipVisibility: setClipVisibilityGlobal,
+    setClipVisibility: store.setClipVisibility,
   }
 }
 

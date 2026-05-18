@@ -1,18 +1,17 @@
 import type { CSSProperties } from "react"
-import { useCallback, useEffect, useMemo, useRef } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { PROJECT_SETTINGS } from "../../../project/project"
 import { useCurrentFrame } from "../frame"
 import { useClipActive, useClipStart, useProvideClipDuration } from "../clip"
 import { createManualPromise, type ManualPromise } from "../../util/promise"
 import {
   normalizeVideo,
-  video_fps,
-  video_frame_count,
-  video_length,
+  fetchVideoMetaAsync,
   type Video,
   type VideoResolvedTrimProps,
 } from "./video"
 import { registerCanvasFrameWaiter } from "./canvas-frame-registry"
+import { backendWebSocketUrl } from "../backend"
 
 // Track pending frame draws so headless callers can await completion.
 const pendingFramePromises = new Set<Promise<void>>()
@@ -67,12 +66,33 @@ export const VideoCanvasRender = ({
   const requestedFrameRef = useRef<number | null>(null)
   const reconnectTimerRef = useRef<number | null>(null)
   const resolved = useMemo(() => normalizeVideo(video), [video])
-  const fps = useMemo(() => video_fps(resolved), [resolved])
-  const sourceFrameCount = useMemo(
-    () => video_frame_count(resolved),
-    [resolved],
-  )
-  const rawDurationFrames = useMemo(() => video_length(resolved), [resolved])
+  const [videoMeta, setVideoMeta] = useState({
+    duration_ms: 0,
+    fps: 0,
+    frame_count: 0,
+    width: 0,
+    height: 0,
+  })
+  useEffect(() => {
+    let cancelled = false
+    void fetchVideoMetaAsync(resolved).then((next) => {
+      if (!cancelled && next) setVideoMeta(next)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [resolved])
+  const fps = videoMeta.fps
+  const sourceFrameCount = videoMeta.frame_count
+  const rawDurationFrames = useMemo(() => {
+    if (videoMeta.frame_count > 0 && videoMeta.fps > 0) {
+      return Math.round(
+        (videoMeta.frame_count * PROJECT_SETTINGS.fps) / videoMeta.fps,
+      )
+    }
+    const seconds = videoMeta.duration_ms > 0 ? videoMeta.duration_ms / 1000 : 0
+    return Math.round(seconds * PROJECT_SETTINGS.fps)
+  }, [videoMeta])
   const durationFrames = Math.max(
     0,
     rawDurationFrames - trimStartFrames - trimEndFrames,
@@ -293,7 +313,7 @@ export const VideoCanvasRender = ({
 
     const connect = () => {
       if (wsRef.current) return
-      const socket = new WebSocket("ws://localhost:3000/ws")
+      const socket = new WebSocket(backendWebSocketUrl("ws"))
       socket.binaryType = "arraybuffer"
       wsRef.current = socket
 
@@ -410,6 +430,7 @@ export const VideoCanvasRender = ({
       if (lastDrawn != null && lastDrawn >= clampedFrame) {
         return
       }
+      sendFrameRequest(clampedFrame)
       await createOrGetFramePromise(clampedFrame).promise
     }
 
@@ -420,7 +441,13 @@ export const VideoCanvasRender = ({
     return () => {
       unregister()
     }
-  }, [clipStart, createOrGetFramePromise, durationFrames, visible])
+  }, [
+    clipStart,
+    createOrGetFramePromise,
+    durationFrames,
+    sendFrameRequest,
+    visible,
+  ])
 
   const baseStyle: CSSProperties = {
     width: "100%",

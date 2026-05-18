@@ -10,9 +10,9 @@ import { PROJECT_SETTINGS } from "../../project/project"
 import { PROJECT } from "../../project/project"
 import { StudioStateContext } from "../lib/studio-state"
 import { WithCurrentFrame } from "../lib/frame"
-import { useTimelineClips } from "../lib/timeline"
+import { TimelineStoreProvider, useTimelineClips } from "../lib/timeline"
 import { Store } from "../util/state"
-import { useAudioSegments } from "../lib/audio-plan"
+import { AudioPlanProvider, useAudioSegments } from "../lib/audio-plan"
 
 const presets = ["medium", "slow", "fast"]
 const encodeOptions = [
@@ -63,7 +63,15 @@ const sectionTitleStyle: CSSProperties = {
   fontWeight: 600,
 }
 
-export const RenderSettingsPage = () => {
+export const RenderSettingsPage = () => (
+  <TimelineStoreProvider>
+    <AudioPlanProvider>
+      <RenderSettingsContent />
+    </AudioPlanProvider>
+  </TimelineStoreProvider>
+)
+
+const RenderSettingsContent = () => {
   const [width, setWidth] = useState(PROJECT_SETTINGS.width ?? 1920)
   const [height, setHeight] = useState(PROJECT_SETTINGS.height ?? 1080)
   const [fps, setFps] = useState(PROJECT_SETTINGS.fps ?? 60)
@@ -87,7 +95,29 @@ export const RenderSettingsPage = () => {
   const [platformLabel, setPlatformLabel] = useState("(detecting)")
   const [platformBinPath, setPlatformBinPath] = useState<string | null>(null)
   const [isDevMode, setIsDevMode] = useState(false)
+  const [backendConfig, setBackendConfig] = useState<{
+    baseUrl: string
+    token: string
+  }>({ baseUrl: "http://127.0.0.1:3000", token: "" })
   const audioSegments = useAudioSegments()
+
+  const backendUrl = useCallback(
+    (path: string) =>
+      `${backendConfig.baseUrl.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`,
+    [backendConfig.baseUrl],
+  )
+
+  const backendHeaders = useCallback(
+    (json = false) => {
+      const headers: Record<string, string> = {}
+      if (json) headers["Content-Type"] = "application/json"
+      if (backendConfig.token) {
+        headers["x-framescript-token"] = backendConfig.token
+      }
+      return headers
+    },
+    [backendConfig.token],
+  )
 
   const commandPreview = useMemo(() => {
     return `${width}:${height}:${fps}:${frames}:${workers}:${encode}:${preset}:${ffmpegThreads}:${ffmpegLowMemory ? 1 : 0}`
@@ -138,6 +168,18 @@ export const RenderSettingsPage = () => {
     void loadPlatform()
   }, [])
 
+  useEffect(() => {
+    const loadBackendConfig = async () => {
+      try {
+        const config = await window.renderAPI?.getBackendConfig?.()
+        if (config?.baseUrl) setBackendConfig(config)
+      } catch {
+        // keep default
+      }
+    }
+    void loadBackendConfig()
+  }, [])
+
   const handleDurationUpdate = useCallback(
     (value: number) => {
       if (value > 0) {
@@ -157,8 +199,9 @@ export const RenderSettingsPage = () => {
     setStatus(null)
     try {
       try {
-        await fetch("http://127.0.0.1:3000/reset", {
+        await fetch(backendUrl("reset"), {
           method: "POST",
+          headers: backendHeaders(),
         })
       } catch (_error) {
         // ignore; still try to start render
@@ -175,27 +218,27 @@ export const RenderSettingsPage = () => {
         if (loudness === "youtube") {
           audioPlanPayload.loudness = "youtube"
         }
-        await fetch("http://127.0.0.1:3000/render_audio_plan", {
+        await fetch(backendUrl("render_audio_plan"), {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: backendHeaders(true),
           body: JSON.stringify(audioPlanPayload),
         })
       } catch (_error) {
         // ignore; still try to start render
       }
       try {
-        await fetch("http://127.0.0.1:3000/set_cache_size", {
+        await fetch(backendUrl("set_cache_size"), {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: backendHeaders(true),
           body: JSON.stringify({ gib: Number(cacheGiB) }),
         })
       } catch (_error) {
         // ignore; still try to start render
       }
       try {
-        await fetch("http://127.0.0.1:3000/render_progress", {
+        await fetch(backendUrl("render_progress"), {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: backendHeaders(true),
           body: JSON.stringify({ completed: 0, total: Number(frames) }),
         })
       } catch (_error) {

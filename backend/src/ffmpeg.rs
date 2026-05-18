@@ -138,20 +138,18 @@ pub fn probe_video_frames(path: &str) -> Result<u64, String> {
         .nb_read_frames
         .as_deref()
         .and_then(|value| value.parse::<u64>().ok())
+        && frames > 0
     {
-        if frames > 0 {
-            return Ok(frames);
-        }
+        return Ok(frames);
     }
 
     if let Some(frames) = stream
         .nb_frames
         .as_deref()
         .and_then(|value| value.parse::<u64>().ok())
+        && frames > 0
     {
-        if frames > 0 {
-            return Ok(frames);
-        }
+        return Ok(frames);
     }
 
     let duration = parse_duration_seconds(stream.duration.as_deref());

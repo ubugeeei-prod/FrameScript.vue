@@ -5,6 +5,7 @@ import {
   type ImgHTMLAttributes,
   type SyntheticEvent,
 } from "react"
+import { registerFrameScriptApi } from "./frame-script-bridge"
 
 type ImageTracker = {
   pending: number
@@ -81,11 +82,10 @@ const installImageApi = () => {
     }
   }
 
-  ;(window as any).__frameScript = {
-    ...(window as any).__frameScript,
+  registerFrameScriptApi({
     waitImagesReady,
     getImagesPending: () => tracker.pending,
-  }
+  })
 }
 
 if (typeof window !== "undefined") {

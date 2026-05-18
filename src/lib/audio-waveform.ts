@@ -1,4 +1,5 @@
 import { fetchAudioBuffer } from "./audio"
+import { registerFrameScriptApi } from "./frame-script-bridge"
 
 /**
  * Cached waveform data (peaks + duration).
@@ -92,11 +93,10 @@ const installAudioWaveformApi = () => {
     }
   }
 
-  ;(window as any).__frameScript = {
-    ...(window as any).__frameScript,
+  registerFrameScriptApi({
     waitAudioWaveformsReady,
     getAudioWaveformsPending: () => tracker.pending,
-  }
+  })
 }
 
 if (typeof window !== "undefined") {

@@ -27,6 +27,7 @@ interface Window {
       isDev?: boolean
     }>
     getOutputPath: () => Promise<{ path: string; displayPath?: string }>
+    getBackendConfig: () => Promise<{ baseUrl: string; token: string }>
     startRender: (
       payload: RenderStartPayload,
     ) => Promise<{ cmd: string; pid: number | undefined }>

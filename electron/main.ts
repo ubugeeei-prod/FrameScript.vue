@@ -3,9 +3,11 @@ import {
   BrowserWindow,
   Menu,
   ipcMain,
+  type IpcMainInvokeEvent,
   type MenuItemConstructorOptions,
 } from "electron"
 import { spawn, ChildProcess } from "node:child_process"
+import { randomBytes } from "node:crypto"
 import fs from "node:fs"
 import * as os from "node:os"
 import path from "node:path"
@@ -23,6 +25,8 @@ const runMode =
   process.env.FRAMESCRIPT_RUN_MODE ?? (useDevServer ? "dev" : "bin")
 const useBinaries = runMode !== "dev"
 const APP_NAME = "FrameScript"
+const backendToken =
+  process.env.FRAMESCRIPT_BACKEND_TOKEN ?? randomBytes(32).toString("hex")
 
 if (app.name !== APP_NAME) {
   app.setName(APP_NAME)
@@ -44,10 +48,71 @@ const resolvePuppeteerExecutablePath = () => {
     if (typeof puppeteer?.executablePath === "function") {
       return puppeteer.executablePath()
     }
-  } catch (_error) {
+  } catch {
     // ignore
   }
   return null
+}
+
+function getBackendBaseUrl() {
+  const value = process.env.FRAMESCRIPT_BACKEND_URL?.trim()
+  if (value) return value.replace(/\/+$/, "")
+  return "http://127.0.0.1:3000"
+}
+
+function getBackendEndpoint(pathname: string) {
+  return `${getBackendBaseUrl()}/${pathname.replace(/^\/+/, "")}`
+}
+
+function getMediaRoots() {
+  const configured = process.env.FRAMESCRIPT_MEDIA_ROOTS
+  if (configured?.trim()) return configured
+  return [process.cwd(), os.homedir()].join(path.delimiter)
+}
+
+function getTrustedOrigins() {
+  const configured = process.env.FRAMESCRIPT_ALLOWED_ORIGINS
+  if (configured?.trim()) {
+    return configured
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean)
+  }
+  return [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
+    "file://",
+    "null",
+  ]
+}
+
+function getBackendRuntimeEnv(): NodeJS.ProcessEnv {
+  return {
+    FRAMESCRIPT_BACKEND_TOKEN: backendToken,
+    FRAMESCRIPT_BACKEND_URL: getBackendBaseUrl(),
+    FRAMESCRIPT_ALLOWED_ORIGINS: getTrustedOrigins().join(","),
+    FRAMESCRIPT_PROJECT_ROOT: process.cwd(),
+    FRAMESCRIPT_MEDIA_ROOTS: getMediaRoots(),
+  }
+}
+
+function assertTrustedUrl(rawUrl: string, label: string) {
+  const parsed = new URL(rawUrl)
+  if (parsed.protocol === "file:") return
+  const trusted = getTrustedOrigins()
+  if (!trusted.includes(parsed.origin)) {
+    throw new Error(`${label} is not a trusted FrameScript origin: ${rawUrl}`)
+  }
+}
+
+function assertTrustedIpcSender(event: IpcMainInvokeEvent) {
+  const senderUrl = event.senderFrame?.url ?? event.sender.getURL()
+  if (!senderUrl) {
+    throw new Error("render IPC sender URL is unavailable")
+  }
+  assertTrustedUrl(senderUrl, "render IPC sender")
 }
 
 function getBundledBinaryEnv(): NodeJS.ProcessEnv {
@@ -224,9 +289,15 @@ function getBackendBinaryPath() {
 }
 
 function getRenderPageUrl() {
-  if (process.env.RENDER_PAGE_URL) return process.env.RENDER_PAGE_URL
+  if (process.env.RENDER_PAGE_URL) {
+    assertTrustedUrl(process.env.RENDER_PAGE_URL, "RENDER_PAGE_URL")
+    return process.env.RENDER_PAGE_URL
+  }
   if (useDevServer) {
-    return process.env.RENDER_DEV_SERVER_URL ?? "http://localhost:5174/render"
+    const renderUrl =
+      process.env.RENDER_DEV_SERVER_URL ?? "http://localhost:5174/render"
+    assertTrustedUrl(renderUrl, "RENDER_DEV_SERVER_URL")
+    return renderUrl
   }
   const htmlPath = path.join(process.cwd(), "dist-render", "render.html")
   return pathToFileURL(htmlPath).toString()
@@ -260,6 +331,7 @@ function startBackend(): Promise<void> {
       env: {
         ...process.env,
         ...getBundledBinaryEnv(),
+        ...getBackendRuntimeEnv(),
       },
     })
 
@@ -278,6 +350,7 @@ function startBackend(): Promise<void> {
       env: {
         ...process.env,
         ...getBundledBinaryEnv(),
+        ...getBackendRuntimeEnv(),
       },
     })
 
@@ -316,20 +389,12 @@ function stopBackend() {
 async function waitForHealthz(): Promise<void> {
   if (backendHealthyPromise) return backendHealthyPromise
 
-  const healthUrl = "http://127.0.0.1:3000/healthz"
+  const healthUrl = getBackendEndpoint("healthz")
   backendHealthyPromise = new Promise((resolve, reject) => {
     const started = Date.now()
     const timeoutMs = 15_000
     const intervalMs = 300
-    let timer: NodeJS.Timeout
-
-    const fail = (error: Error) => {
-      clearInterval(timer)
-      clearBackendHealth()
-      reject(error)
-    }
-
-    timer = setInterval(() => {
+    const timer: NodeJS.Timeout = setInterval(() => {
       fetch(healthUrl)
         .then((res) => {
           if (res.ok) {
@@ -342,7 +407,9 @@ async function waitForHealthz(): Promise<void> {
         })
 
       if (Date.now() - started > timeoutMs) {
-        fail(new Error("healthz timeout"))
+        clearInterval(timer)
+        clearBackendHealth()
+        reject(new Error("healthz timeout"))
       }
     }, intervalMs)
   })
@@ -352,6 +419,7 @@ async function waitForHealthz(): Promise<void> {
 
 function resolveRenderSettingsUrl() {
   if (useDevServer && process.env.VITE_DEV_SERVER_URL) {
+    assertTrustedUrl(process.env.VITE_DEV_SERVER_URL, "VITE_DEV_SERVER_URL")
     return `${process.env.VITE_DEV_SERVER_URL}/#/render-settings`
   }
 
@@ -362,6 +430,7 @@ function resolveRenderSettingsUrl() {
 function resolveRenderProgressUrl() {
   const outputParam = encodeURIComponent(getRenderOutputDisplayPath())
   if (useDevServer && process.env.VITE_DEV_SERVER_URL) {
+    assertTrustedUrl(process.env.VITE_DEV_SERVER_URL, "VITE_DEV_SERVER_URL")
     return `${process.env.VITE_DEV_SERVER_URL}/#/render-progress?output=${outputParam}`
   }
 
@@ -417,6 +486,7 @@ function startRenderProcess(payload: RenderStartPayload) {
         env: {
           ...process.env,
           ...getBundledBinaryEnv(),
+          ...getBackendRuntimeEnv(),
           RENDER_PAGE_URL: getRenderPageUrl(),
           RENDER_OUTPUT_PATH: getRenderOutputPath(),
         },
@@ -456,6 +526,7 @@ function startRenderProcess(payload: RenderStartPayload) {
         env: {
           ...process.env,
           ...getBundledBinaryEnv(),
+          ...getBackendRuntimeEnv(),
           RENDER_PAGE_URL: getRenderPageUrl(),
           RENDER_OUTPUT_PATH: getRenderOutputPath(),
         },
@@ -495,6 +566,7 @@ async function createWindow() {
   })
 
   if (useDevServer && process.env.VITE_DEV_SERVER_URL) {
+    assertTrustedUrl(process.env.VITE_DEV_SERVER_URL, "VITE_DEV_SERVER_URL")
     await mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL)
     //mainWindow.webContents.openDevTools();
   } else {
@@ -585,7 +657,8 @@ function createRenderProgressWindow() {
 }
 
 function setupRenderIpc() {
-  ipcMain.handle("render:getPlatform", () => {
+  ipcMain.handle("render:getPlatform", (event) => {
+    assertTrustedIpcSender(event)
     if (!useBinaries) {
       const renderDir = path.join(process.cwd(), "render")
       return {
@@ -604,18 +677,29 @@ function setupRenderIpc() {
     }
   })
 
-  ipcMain.handle("render:getOutputPath", () => {
+  ipcMain.handle("render:getOutputPath", (event) => {
+    assertTrustedIpcSender(event)
     return {
       path: getRenderOutputPath(),
       displayPath: getRenderOutputDisplayPath(),
     }
   })
 
-  ipcMain.handle("render:openProgress", () => {
+  ipcMain.handle("render:getBackendConfig", (event) => {
+    assertTrustedIpcSender(event)
+    return {
+      baseUrl: getBackendBaseUrl(),
+      token: backendToken,
+    }
+  })
+
+  ipcMain.handle("render:openProgress", (event) => {
+    assertTrustedIpcSender(event)
     createRenderProgressWindow()
   })
 
-  ipcMain.handle("render:start", (_event, payload: unknown) => {
+  ipcMain.handle("render:start", (event, payload: unknown) => {
+    assertTrustedIpcSender(event)
     return startRenderProcess(validateRenderStartPayload(payload))
   })
 }

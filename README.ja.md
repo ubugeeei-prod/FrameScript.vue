@@ -14,7 +14,7 @@ FrameScript.vue は Vue SFC + CSS で動画を記述できる FrameScript の fo
 
 ## Vue SFC で動画を構成
 
-`project/project.vue` を編集します。
+Vue SFC で書く場合は `project/project.vue` を編集します。`project/project.tsx` は Vue プロジェクトをマウントする React/FrameScript 側のエントリポイントで、高度な統合が必要な場合に編集します。
 
 ```vue
 <script setup lang="ts">
@@ -91,6 +91,12 @@ cd <project-path>
 npm run start
 ```
 
+`npm run start` はクリーン checkout から動く source/dev モードを起動します。Rust バイナリと render アセットを含む production 近い経路は `npm run start:bin` を使います。
+
 ## ドキュメント
 
-- [FrameScript Docs](https://frame-script.github.io/FrameScript/ja)
+- [FrameScript.vue docs](./docs/docs/index.md)
+- [Production runbook](./docs/docs/production.md)
+- [Third-party binary notices](./THIRD_PARTY_NOTICES.md)
+
+FrameScript.vue は upstream FrameScript の考え方を引き継ぎつつ、このリポジトリでは Vue SFC + CSS によるプロジェクト記述を主軸にしています。

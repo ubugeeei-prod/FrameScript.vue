@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { PROJECT, PROJECT_SETTINGS } from "../project/project"
 import { WithCurrentFrame } from "./lib/frame"
+import { AudioPlanProvider } from "./lib/audio-plan"
+import { TimelineStoreProvider } from "./lib/timeline"
 import { TimelineUI } from "./ui/timeline"
 import { ClipVisibilityPanel } from "./ui/clip-visibility"
 import { Store } from "./util/state"
@@ -185,170 +187,179 @@ export const StudioApp = () => {
       value={{ isPlaying, setIsPlaying, isPlayingStore, isRender: false }}
     >
       <WithCurrentFrame>
-        <div
-          style={{
-            padding: 16,
-            height: "100vh",
-            boxSizing: "border-box",
-            minHeight: 0,
-          }}
-        >
-          <div
-            ref={containerRef}
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: 10,
-              width: "100%",
-              height: "100%",
-              boxSizing: "border-box",
-              minHeight: 0,
-            }}
-          >
+        <TimelineStoreProvider>
+          <AudioPlanProvider>
             <div
-              ref={topRef}
               style={{
-                display: "flex",
-                gap: 10,
-                alignItems: "stretch",
-                width: "100%",
-                flexBasis: `${verticalRatio * 100}%`,
-                minHeight: 240,
-                maxHeight: "80%",
-                minWidth: 0,
+                padding: 16,
+                height: "100vh",
+                boxSizing: "border-box",
+                minHeight: 0,
               }}
             >
               <div
+                ref={containerRef}
                 style={{
-                  flexBasis: `${horizontalRatio * 100}%`,
-                  minWidth: 220,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 10,
+                  width: "100%",
+                  height: "100%",
+                  boxSizing: "border-box",
                   minHeight: 0,
                 }}
               >
-                {mountUiPanels ? (
-                  <ClipVisibilityPanel />
-                ) : (
-                  <div
-                    style={{
-                      width: "100%",
-                      height: "100%",
-                      borderRadius: 8,
-                      background: "#0f172a",
-                      border: "1px solid #1f2937",
-                    }}
-                  />
-                )}
-              </div>
-              <div
-                onPointerDown={startHorizontalDrag}
-                style={{
-                  width: 6,
-                  cursor: "col-resize",
-                  background: "linear-gradient(180deg, #1f2937, #111827)",
-                  borderRadius: 4,
-                  flexShrink: 0,
-                }}
-              />
-              <div
-                style={{
-                  flex: 1,
-                  minWidth: 320,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  minHeight: previewMinHeight,
-                  position: "relative",
-                }}
-              >
                 <div
-                  ref={previewRef}
+                  ref={topRef}
                   style={{
-                    width: "100%",
-                    height: "100%",
                     display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    boxSizing: "border-box",
+                    gap: 10,
+                    alignItems: "stretch",
+                    width: "100%",
+                    flexBasis: `${verticalRatio * 100}%`,
+                    minHeight: 240,
+                    maxHeight: "80%",
+                    minWidth: 0,
                   }}
                 >
                   <div
                     style={{
-                      width: scaledWidth,
-                      height: scaledHeight,
-                      visibility: hasPreviewViewport ? "visible" : "hidden",
-                      aspectRatio: previewAspect,
-                      border: "1px solid #444",
-                      borderRadius: 1,
-                      overflow: "hidden",
-                      backgroundColor: "#000",
-                      boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
+                      flexBasis: `${horizontalRatio * 100}%`,
+                      minWidth: 220,
+                      minHeight: 0,
+                    }}
+                  >
+                    {mountUiPanels ? (
+                      <ClipVisibilityPanel />
+                    ) : (
+                      <div
+                        style={{
+                          width: "100%",
+                          height: "100%",
+                          borderRadius: 8,
+                          background: "#0f172a",
+                          border: "1px solid #1f2937",
+                        }}
+                      />
+                    )}
+                  </div>
+                  <div
+                    onPointerDown={startHorizontalDrag}
+                    style={{
+                      width: 6,
+                      cursor: "col-resize",
+                      background: "linear-gradient(180deg, #1f2937, #111827)",
+                      borderRadius: 4,
+                      flexShrink: 0,
+                    }}
+                  />
+                  <div
+                    style={{
+                      flex: 1,
+                      minWidth: 320,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      minHeight: previewMinHeight,
                       position: "relative",
                     }}
                   >
                     <div
+                      ref={previewRef}
                       style={{
-                        width: projectWidth,
-                        height: projectHeight,
-                        transform: `scale(${scale})`,
-                        transformOrigin: "top left",
+                        width: "100%",
+                        height: "100%",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        boxSizing: "border-box",
                       }}
                     >
-                      {mountProjectPreview ? (
-                        <PROJECT />
-                      ) : (
+                      <div
+                        style={{
+                          width: scaledWidth,
+                          height: scaledHeight,
+                          visibility: hasPreviewViewport ? "visible" : "hidden",
+                          aspectRatio: previewAspect,
+                          border: "1px solid #444",
+                          borderRadius: 1,
+                          overflow: "hidden",
+                          backgroundColor: "#000",
+                          boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
+                          position: "relative",
+                        }}
+                      >
                         <div
                           style={{
-                            width: "100%",
-                            height: "100%",
-                            display: "grid",
-                            placeItems: "center",
-                            color: "#94a3b8",
-                            fontSize: 13,
-                            fontFamily:
-                              "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
+                            width: projectWidth,
+                            height: projectHeight,
+                            transform: `scale(${scale})`,
+                            transformOrigin: "top left",
                           }}
                         >
-                          Loading preview...
+                          {mountProjectPreview ? (
+                            <PROJECT />
+                          ) : (
+                            <div
+                              style={{
+                                width: "100%",
+                                height: "100%",
+                                display: "grid",
+                                placeItems: "center",
+                                color: "#94a3b8",
+                                fontSize: 13,
+                                fontFamily:
+                                  "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
+                              }}
+                            >
+                              Loading preview...
+                            </div>
+                          )}
                         </div>
-                      )}
+                      </div>
                     </div>
+                  </div>
+                </div>
+
+                <div
+                  onPointerDown={startVerticalDrag}
+                  style={{
+                    height: 8,
+                    cursor: "row-resize",
+                    background: "linear-gradient(90deg, #1f2937, #111827)",
+                    borderRadius: 4,
+                    flexShrink: 0,
+                  }}
+                />
+
+                <div
+                  style={{
+                    flex: 1,
+                    minHeight: 160,
+                    display: "flex",
+                    minWidth: 0,
+                  }}
+                >
+                  <div style={{ flex: 1, minHeight: 0 }}>
+                    {mountUiPanels ? (
+                      <TimelineUI />
+                    ) : (
+                      <div
+                        style={{
+                          width: "100%",
+                          height: "100%",
+                          borderRadius: 8,
+                          background: "#0f172a",
+                          border: "1px solid #1f2937",
+                        }}
+                      />
+                    )}
                   </div>
                 </div>
               </div>
             </div>
-
-            <div
-              onPointerDown={startVerticalDrag}
-              style={{
-                height: 8,
-                cursor: "row-resize",
-                background: "linear-gradient(90deg, #1f2937, #111827)",
-                borderRadius: 4,
-                flexShrink: 0,
-              }}
-            />
-
-            <div
-              style={{ flex: 1, minHeight: 160, display: "flex", minWidth: 0 }}
-            >
-              <div style={{ flex: 1, minHeight: 0 }}>
-                {mountUiPanels ? (
-                  <TimelineUI />
-                ) : (
-                  <div
-                    style={{
-                      width: "100%",
-                      height: "100%",
-                      borderRadius: 8,
-                      background: "#0f172a",
-                      border: "1px solid #1f2937",
-                    }}
-                  />
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
+          </AudioPlanProvider>
+        </TimelineStoreProvider>
       </WithCurrentFrame>
     </StudioStateContext>
   )

@@ -16,7 +16,7 @@ FrameScript.vue is a fork of FrameScript for authoring video projects with Vue S
 
 ## Build videos with Vue SFC
 
-Edit `project/project.vue`.
+Edit `project/project.vue` for Vue SFC authoring. `project/project.tsx` is the React/FrameScript entrypoint that mounts the Vue project and can be edited for advanced integration.
 
 ```vue
 <script setup lang="ts">
@@ -93,6 +93,12 @@ cd <project-path>
 npm run start
 ```
 
+`npm run start` launches source/dev mode from a clean checkout. Use `npm run start:bin` for the production-like path that builds Rust binaries and packaged render assets.
+
 ## Documentation
 
-- [FrameScript Docs](https://frame-script.github.io/FrameScript/)
+- [FrameScript.vue docs](./docs/docs/index.md)
+- [Production runbook](./docs/docs/production.md)
+- [Third-party binary notices](./THIRD_PARTY_NOTICES.md)
+
+FrameScript.vue tracks the upstream FrameScript ideas, but this repository focuses on Vue SFC + CSS project authoring.

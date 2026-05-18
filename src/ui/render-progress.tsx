@@ -5,6 +5,22 @@ type Progress = {
   total: number
 }
 
+type BackendConfig = {
+  baseUrl: string
+  token: string
+}
+
+const defaultBackendConfig: BackendConfig = {
+  baseUrl: "http://127.0.0.1:3000",
+  token: "",
+}
+
+const backendUrl = (config: BackendConfig, path: string) =>
+  `${config.baseUrl.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`
+
+const backendHeaders = (config: BackendConfig) =>
+  config.token ? { "x-framescript-token": config.token } : undefined
+
 export const RenderProgressPage = () => {
   const normalizeOutputPath = (value: string | null) => {
     if (!value) return null
@@ -15,6 +31,8 @@ export const RenderProgressPage = () => {
   const isCompleted = progress.total > 0 && progress.completed >= progress.total
   const [confirmCancel, setConfirmCancel] = useState(false)
   const [cancelBusy, setCancelBusy] = useState(false)
+  const [backendConfig, setBackendConfig] =
+    useState<BackendConfig>(defaultBackendConfig)
   const [outputPath, setOutputPath] = useState<string | null>(() => {
     const hash = window.location.hash ?? ""
     const query = hash.includes("?") ? (hash.split("?")[1] ?? "") : ""
@@ -23,10 +41,28 @@ export const RenderProgressPage = () => {
   })
 
   useEffect(() => {
+    let alive = true
+    const loadConfig = async () => {
+      try {
+        const config = await window.renderAPI?.getBackendConfig?.()
+        if (alive && config?.baseUrl) setBackendConfig(config)
+      } catch {
+        // keep default
+      }
+    }
+    void loadConfig()
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  useEffect(() => {
     let cancelled = false
     const tick = async () => {
       try {
-        const res = await fetch("http://127.0.0.1:3000/render_progress")
+        const res = await fetch(backendUrl(backendConfig, "render_progress"), {
+          headers: backendHeaders(backendConfig),
+        })
         if (res.ok) {
           const data = (await res.json()) as Progress
           if (!cancelled) {
@@ -44,7 +80,7 @@ export const RenderProgressPage = () => {
       cancelled = true
       window.clearInterval(timer)
     }
-  }, [])
+  }, [backendConfig])
 
   useEffect(() => {
     let alive = true
@@ -74,8 +110,9 @@ export const RenderProgressPage = () => {
   const requestCancel = async () => {
     setCancelBusy(true)
     try {
-      await fetch("http://127.0.0.1:3000/render_cancel", {
+      await fetch(backendUrl(backendConfig, "render_cancel"), {
         method: "POST",
+        headers: backendHeaders(backendConfig),
       })
       window.close()
     } catch (_error) {

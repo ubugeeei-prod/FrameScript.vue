@@ -6,6 +6,7 @@ import {
   type RefObject,
 } from "react"
 import { createManualPromise, type ManualPromise } from "../../util/promise"
+import { registerFrameScriptApi } from "../frame-script-bridge"
 
 export type WebGLContextLike = WebGLRenderingContext | WebGL2RenderingContext
 
@@ -103,12 +104,11 @@ const installWebGLApi = () => {
     }
   }
 
-  ;(window as any).__frameScript = {
-    ...(window as any).__frameScript,
+  registerFrameScriptApi({
     waitWebGLReady,
     waitWebGLFrame,
     getWebGLPending: () => tracker.pending,
-  }
+  })
 }
 
 if (typeof window !== "undefined") {

@@ -40,4 +40,6 @@ FrameScript Studio should launch.
 
 ### Edit the project
 
-Your main editable project lives in `project/project.vue`.
+Your main editable Vue project lives in `project/project.vue`. The `project/project.tsx` file is the React/FrameScript entrypoint that mounts the Vue project and is available for advanced integration.
+
+For production builds and render troubleshooting, see the [Production Runbook](./production.md).

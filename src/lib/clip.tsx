@@ -453,12 +453,7 @@ export const Clip = ({
 
   return (
     <DurationReportContext.Provider value={durationReporter}>
-      <ClipStatic
-        start={start}
-        end={end < start ? start : end}
-        label={label}
-        laneId={laneId}
-      >
+      <ClipStatic start={start} end={end} label={label} laneId={laneId}>
         <ClipAnimationSync>{children}</ClipAnimationSync>
       </ClipStatic>
     </DurationReportContext.Provider>
@@ -493,9 +488,9 @@ export const Serial = ({ children }: { children: React.ReactNode }) => {
 
   const serialised = clips.map((el, index) => {
     const { start, end } = el.props
-    const duration = Math.max(0, end - start) // inclusive span
+    const duration = Math.max(0, end - start + 1) // inclusive span
     const nextStart = index === 0 ? baseStart : cursor
-    const nextEnd = nextStart + duration
+    const nextEnd = nextStart + duration - 1
     cursor = nextEnd + 1
 
     return cloneElement(el, {

@@ -79,6 +79,8 @@ import { Character } from "../src/lib/sound/character"
 />
 ```
 
+When the same audio file is reused in multiple clips, lip-sync and waveform lookups are scoped by the clip/audio segment identity first, then fall back to the single matching source path. This keeps repeated voice files aligned to the clip instance that owns them.
+
 ### `<PsdCharacter>`
 
 Controls animations such as lip-sync using a PSD file.

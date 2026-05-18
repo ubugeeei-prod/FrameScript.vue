@@ -5,9 +5,11 @@ use std::{
 
 use manual_future::{ManualFuture, ManualFutureCompleter};
 
+type SharedManualFutureState<T> = (Option<Arc<T>>, Vec<ManualFutureCompleter<Arc<T>>>);
+
 #[derive(Debug)]
 pub struct SharedManualFuture<T: Send> {
-    value: Arc<Mutex<(Option<Arc<T>>, Vec<ManualFutureCompleter<Arc<T>>>)>>,
+    value: Arc<Mutex<SharedManualFutureState<T>>>,
 }
 
 impl<T: Send> SharedManualFuture<T> {
@@ -63,6 +65,12 @@ impl<T: Send> SharedManualFuture<T> {
         for completer in completers {
             completer.complete(arc_complete_value.clone()).await;
         }
+    }
+}
+
+impl<T: Send> Default for SharedManualFuture<T> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

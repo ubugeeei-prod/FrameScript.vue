@@ -21,9 +21,11 @@ import {
 } from "../../animation"
 import { useCurrentFrame, useGlobalCurrentFrame } from "../../frame"
 import { Sound } from "../../sound/sound"
-import { Clip, ClipSequence, useClipActive } from "../../clip"
+import { Clip, ClipSequence, useClipActive, useClipId } from "../../clip"
 import { useAudioSegments } from "../../audio-plan"
 import { useWaveformBank } from "../../sound/character"
+import { backendFetch, buildBackendUrl } from "../../backend"
+import { registerFrameScriptApi } from "../../frame-script-bridge"
 
 type PsdCharacterProps = {
   psd: string
@@ -126,12 +128,11 @@ const installPsdApi = () => {
     }
   }
 
-  ;(window as any).__frameScript = {
-    ...(window as any).__frameScript,
+  registerFrameScriptApi({
     waitPsdReady,
     waitPsdFrame,
     getPsdPending: () => tracker.pending,
-  }
+  })
 }
 
 if (typeof window !== "undefined") {
@@ -255,6 +256,7 @@ export const PsdCharacter = ({
     let alive = true
 
     setPsd(undefined)
+    setAst(parsePsdCharacter(children))
     fetchPsd(normalizePsdPath(psd))
       .then((p) => {
         if (!alive || loadId !== loadIdRef.current) return
@@ -268,14 +270,13 @@ export const PsdCharacter = ({
           endPending()
         }
       })
-    setAst(parsePsdCharacter(children))
     return () => {
       alive = false
       if (loadId === loadIdRef.current) {
         endPending()
       }
     }
-  }, [beginPending, endPending, loadIdRef, psd])
+  }, [beginPending, children, endPending, loadIdRef, psd])
 
   /**
    * Render PSD every frame.
@@ -427,12 +428,12 @@ const MotionSequenceRuntime = ({
 
   useEffect(() => {
     return () => unregister()
-  }, [])
+  }, [unregister])
 
   // 直列のため同じregisterを使う
   const curRegister: OptionRegister = useCallback(() => {
     return { update, getter, unregister: () => {} }
-  }, [])
+  }, [getter, unregister, update])
 
   return (
     <ClipSequence>
@@ -556,7 +557,7 @@ const MotionClipRuntime = ({
 
   useEffect(() => {
     return () => unregister()
-  }, [])
+  }, [unregister])
 
   const curRegistry = useRef(new Map<string, PsdOptions>())
   const order = useRef<string[]>([])
@@ -600,12 +601,12 @@ const MotionClipRuntime = ({
       getter,
       unregister,
     }
-  }, [])
+  }, [recompute, superGetter])
 
   const frame = useCurrentFrame()
   useEffect(() => {
     update(options.current)
-  }, [frame])
+  }, [frame, update])
 
   return (
     <>
@@ -669,9 +670,12 @@ const DeclareAnimationRuntime = ({
   initializingVariables,
   register,
 }: DeclareAnimationRuntimeProps) => {
-  useAnimation(async (ctx) => {
-    await ast.animation(ctx, initializingVariables)
-  }, [])
+  useAnimation(
+    async (ctx) => {
+      await ast.animation(ctx, initializingVariables)
+    },
+    [ast, ...Object.values(initializingVariables)],
+  )
 
   const curVariables = { ...variables, ...initializingVariables }
 
@@ -683,7 +687,7 @@ const DeclareAnimationRuntime = ({
 
   useEffect(() => {
     return () => unregister()
-  }, [])
+  }, [unregister])
 
   const curRegistry = useRef(new Map<string, PsdOptions>())
   const order = useRef<string[]>([])
@@ -727,12 +731,12 @@ const DeclareAnimationRuntime = ({
       getter,
       unregister,
     }
-  }, [])
+  }, [recompute, superGetter])
 
   const frame = useCurrentFrame()
   useEffect(() => {
     update(options.current)
-  }, [frame])
+  }, [frame, update])
 
   return (
     <>
@@ -807,15 +811,24 @@ const VoiceRuntimeInner = ({ ast, variables, register }: VoiceRuntimeProps) => {
 
   useEffect(() => {
     return () => unregister()
-  }, [])
+  }, [unregister])
 
   const localFrame = useCurrentFrame()
   const globalFrame = useGlobalCurrentFrame()
   const frames = [localFrame, globalFrame]
+  const clipId = useClipId()
   const audioSegments = useAudioSegments()
   const audioSegment = useMemo(() => {
-    return audioSegments.filter((seg) => seg.source.path == ast.voice).at(0)
-  }, [ast, audioSegments])
+    const matching = audioSegments.filter(
+      (seg) => seg.source.path === ast.voice,
+    )
+    if (clipId) {
+      const scoped = matching.find((seg) => seg.clipId === clipId)
+      if (scoped) return scoped
+    }
+    if (matching.length === 1) return matching[0]
+    return matching.find((seg) => !seg.clipId) ?? matching[0]
+  }, [ast.voice, audioSegments, clipId])
   const waveformData = useWaveformBank([ast.voice])
 
   useEffect(() => {
@@ -829,7 +842,15 @@ const VoiceRuntimeInner = ({ ast, variables, register }: VoiceRuntimeProps) => {
         ),
       )
     }
-  }, [localFrame, audioSegment, waveformData])
+  }, [
+    ast,
+    audioSegment,
+    globalFrame,
+    localFrame,
+    update,
+    variables,
+    waveformData,
+  ])
 
   const volume =
     typeof ast.volume === "function"
@@ -863,14 +884,14 @@ const MotionRuntime = ({ ast, variables, register }: MotionRuntimeProps) => {
 
   useEffect(() => {
     return () => unregister()
-  }, [])
+  }, [unregister])
 
   const localTime = useCurrentFrame()
   const globalTime = useGlobalCurrentFrame()
 
   useEffect(() => {
     update(ast.motion(variables, [localTime, globalTime]))
-  }, [localTime])
+  }, [ast, globalTime, localTime, update, variables])
 
   return null
 }
@@ -886,7 +907,7 @@ const fetchPsd = async (psd: PsdPath): Promise<Psd> => {
   if (pending) return pending
 
   const next = (async () => {
-    const res = await fetch(buildPsdUrl(psd))
+    const res = await backendFetch(buildPsdUrl(psd))
     if (!res.ok) {
       throw new Error("failed to fetch psd file")
     }
@@ -908,7 +929,5 @@ const normalizePsdPath = (psd: PsdPath | string): PsdPath => {
 }
 
 const buildPsdUrl = (pad: PsdPath) => {
-  const url = new URL("http://localhost:3000/file")
-  url.searchParams.set("path", pad.path)
-  return url.toString()
+  return buildBackendUrl("file", { path: pad.path })
 }

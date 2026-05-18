@@ -9,6 +9,7 @@ import { useClipId, useClipStart, useProvideClipDuration } from "./clip"
 import { useCurrentFrame } from "./frame"
 import type { Easing } from "./animation/functions"
 import { useTimelineClips, type TimelineClip } from "./timeline"
+import { registerFrameScriptApi } from "./frame-script-bridge"
 
 type Lerp<T> = (from: T, to: T, t: number) => T
 
@@ -173,11 +174,10 @@ const installAnimationApi = () => {
     }
   }
 
-  ;(window as any).__frameScript = {
-    ...(window as any).__frameScript,
+  registerFrameScriptApi({
     waitAnimationsReady,
     getAnimationsPending: () => tracker.pending,
-  }
+  })
 }
 
 const toFrames = (value: number) => Math.max(0, Math.round(value))
@@ -623,4 +623,12 @@ export const useAnimation = (
   }, effectDeps)
 
   return { durationFrames, ready }
+}
+
+export const __animationTestUtils = {
+  getKind,
+  assertCompatibleValue,
+  sampleSegment,
+  sampleVariable,
+  lerpForKind,
 }

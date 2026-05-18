@@ -1,5 +1,5 @@
 import type { CSSProperties } from "react"
-import { useEffect, useId, useMemo, useRef } from "react"
+import { useEffect, useId, useMemo, useRef, useState } from "react"
 import { useCurrentFrame } from "../frame"
 import { PROJECT_SETTINGS } from "../../../project/project"
 import { useIsPlaying, useIsRender } from "../studio-state"
@@ -9,13 +9,12 @@ import {
   useClipRange,
   useProvideClipDuration,
 } from "../clip"
-import {
-  registerAudioSegmentGlobal,
-  unregisterAudioSegmentGlobal,
-} from "../audio-plan"
+import { useAudioPlanRegistration } from "../audio-plan"
 import { VideoCanvasRender } from "./video-render"
 import type { Trim } from "../trim"
 import { resolveTrimFrames } from "../trim"
+import { backendFetch, buildBackendUrl } from "../backend"
+import { trackMediaMetadataPromise } from "../media-metadata"
 
 /**
  * Video source descriptor.
@@ -64,15 +63,11 @@ export const normalizeVideo = (video: Video | string): Video => {
 }
 
 const buildVideoUrl = (video: Video) => {
-  const url = new URL("http://localhost:3000/video")
-  url.searchParams.set("path", video.path)
-  return url.toString()
+  return buildBackendUrl("video", { path: video.path })
 }
 
 const buildMetaUrl = (video: Video) => {
-  const url = new URL("http://localhost:3000/video/meta")
-  url.searchParams.set("path", video.path)
-  return url.toString()
+  return buildBackendUrl("video/meta", { path: video.path })
 }
 
 type VideoMeta = {
@@ -84,55 +79,96 @@ type VideoMeta = {
 }
 
 const videoMetaCache = new Map<string, VideoMeta>()
+const videoMetaPending = new Map<string, Promise<VideoMeta | null>>()
 
-const fetchVideoMetaSync = (video: Video): VideoMeta => {
-  if (videoMetaCache.has(video.path)) {
-    return videoMetaCache.get(video.path)!
-  }
+const emptyVideoMeta: VideoMeta = {
+  duration_ms: 0,
+  fps: 0,
+  frame_count: 0,
+  width: 0,
+  height: 0,
+}
 
-  const fallback: VideoMeta = {
-    duration_ms: 0,
-    fps: 0,
-    frame_count: 0,
-    width: 0,
-    height: 0,
-  }
+const normalizeVideoMeta = (payload: Partial<VideoMeta>): VideoMeta => ({
+  duration_ms:
+    typeof payload.duration_ms === "number"
+      ? Math.max(0, payload.duration_ms)
+      : 0,
+  fps: typeof payload.fps === "number" ? payload.fps : 0,
+  frame_count:
+    typeof payload.frame_count === "number"
+      ? Math.max(0, Math.round(payload.frame_count))
+      : 0,
+  width:
+    typeof payload.width === "number"
+      ? Math.max(0, Math.round(payload.width))
+      : 0,
+  height:
+    typeof payload.height === "number"
+      ? Math.max(0, Math.round(payload.height))
+      : 0,
+})
 
-  try {
-    const xhr = new XMLHttpRequest()
-    xhr.open("GET", buildMetaUrl(video), false) // 同期リクエストで初期ロード用途
-    xhr.send()
+export const fetchVideoMetaAsync = async (
+  video: Video,
+): Promise<VideoMeta | null> => {
+  const cached = videoMetaCache.get(video.path)
+  if (cached) return cached
 
-    if (xhr.status >= 200 && xhr.status < 300) {
-      const payload = JSON.parse(xhr.responseText) as Partial<VideoMeta>
-      const meta: VideoMeta = {
-        duration_ms:
-          typeof payload.duration_ms === "number"
-            ? Math.max(0, payload.duration_ms)
-            : 0,
-        fps: typeof payload.fps === "number" ? payload.fps : 0,
-        frame_count:
-          typeof payload.frame_count === "number"
-            ? Math.max(0, Math.round(payload.frame_count))
-            : 0,
-        width:
-          typeof payload.width === "number"
-            ? Math.max(0, Math.round(payload.width))
-            : 0,
-        height:
-          typeof payload.height === "number"
-            ? Math.max(0, Math.round(payload.height))
-            : 0,
+  const pending = videoMetaPending.get(video.path)
+  if (pending) return pending
+
+  const next = trackMediaMetadataPromise(
+    (async () => {
+      const res = await backendFetch(buildMetaUrl(video))
+      if (!res.ok) return null
+      const meta = normalizeVideoMeta((await res.json()) as Partial<VideoMeta>)
+      if (meta.duration_ms > 0 || meta.frame_count > 0) {
+        videoMetaCache.set(video.path, meta)
       }
-      videoMetaCache.set(video.path, meta)
       return meta
-    }
-  } catch (error) {
-    console.error("fetchVideoMetaSync(): failed to fetch metadata", error)
-  }
+    })(),
+  )
+    .catch((error) => {
+      console.error("fetchVideoMetaAsync(): failed to fetch metadata", error)
+      return null
+    })
+    .finally(() => {
+      videoMetaPending.delete(video.path)
+    })
 
-  videoMetaCache.set(video.path, fallback)
-  return fallback
+  videoMetaPending.set(video.path, next)
+  return next
+}
+
+const getCachedVideoMeta = (video: Video): VideoMeta => {
+  const cached = videoMetaCache.get(video.path)
+  if (cached) return cached
+  void fetchVideoMetaAsync(video)
+  return emptyVideoMeta
+}
+
+const useVideoMeta = (video: Video) => {
+  const [meta, setMeta] = useState<VideoMeta>(() => getCachedVideoMeta(video))
+
+  useEffect(() => {
+    const cached = videoMetaCache.get(video.path)
+    if (cached) {
+      setMeta(cached)
+      return
+    }
+
+    let cancelled = false
+    setMeta(emptyVideoMeta)
+    void fetchVideoMetaAsync(video).then((next) => {
+      if (!cancelled && next) setMeta(next)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [video, video.path])
+
+  return meta
 }
 
 /**
@@ -147,7 +183,7 @@ const fetchVideoMetaSync = (video: Video): VideoMeta => {
  */
 export const video_length = (video: Video | string): number => {
   const resolved = normalizeVideo(video)
-  const meta = fetchVideoMetaSync(resolved)
+  const meta = getCachedVideoMeta(resolved)
   if (meta.frame_count > 0 && meta.fps > 0) {
     return Math.round((meta.frame_count * PROJECT_SETTINGS.fps) / meta.fps)
   }
@@ -167,13 +203,13 @@ export const video_length = (video: Video | string): number => {
  */
 export const video_fps = (video: Video | string): number => {
   const resolved = normalizeVideo(video)
-  const meta = fetchVideoMetaSync(resolved)
+  const meta = getCachedVideoMeta(resolved)
   return meta.fps
 }
 
 export const video_frame_count = (video: Video | string): number => {
   const resolved = normalizeVideo(video)
-  const meta = fetchVideoMetaSync(resolved)
+  const meta = getCachedVideoMeta(resolved)
   return meta.frame_count
 }
 
@@ -184,7 +220,7 @@ export type VideoDimensions = {
 
 export const video_dimensions = (video: Video | string): VideoDimensions => {
   const resolved = normalizeVideo(video)
-  const meta = fetchVideoMetaSync(resolved)
+  const meta = getCachedVideoMeta(resolved)
   return { width: meta.width, height: meta.height }
 }
 
@@ -216,14 +252,17 @@ export type VideoResolvedTrimProps = {
 export const Video = ({ video, style, trim, showWaveform }: VideoProps) => {
   const isRender = useIsRender()
   const id = useId()
+  const { registerAudioSegment, unregisterAudioSegment } =
+    useAudioPlanRegistration()
   const clipId = useClipId()
   const clipRange = useClipRange()
   const resolvedVideo = useMemo(() => normalizeVideo(video), [video])
+  const videoMeta = useVideoMeta(resolvedVideo)
   const resolvedStyle = useMemo(() => {
     if (style?.aspectRatio != null) {
       return style
     }
-    const { width, height } = video_dimensions(resolvedVideo)
+    const { width, height } = videoMeta
     if (width <= 0 || height <= 0) {
       return style
     }
@@ -231,11 +270,16 @@ export const Video = ({ video, style, trim, showWaveform }: VideoProps) => {
       ...style,
       aspectRatio: `${width} / ${height}`,
     }
-  }, [resolvedVideo, style])
-  const rawDurationFrames = useMemo(
-    () => video_length(resolvedVideo),
-    [resolvedVideo],
-  )
+  }, [style, videoMeta])
+  const rawDurationFrames = useMemo(() => {
+    if (videoMeta.frame_count > 0 && videoMeta.fps > 0) {
+      return Math.round(
+        (videoMeta.frame_count * PROJECT_SETTINGS.fps) / videoMeta.fps,
+      )
+    }
+    const seconds = videoMeta.duration_ms > 0 ? videoMeta.duration_ms / 1000 : 0
+    return Math.round(seconds * PROJECT_SETTINGS.fps)
+  }, [videoMeta])
   const { trimStartFrames, trimEndFrames } = useMemo(
     () =>
       resolveTrimFrames({
@@ -257,7 +301,7 @@ export const Video = ({ video, style, trim, showWaveform }: VideoProps) => {
     const durationFrames = Math.min(clipDurationFrames, availableFrames)
     if (durationFrames <= 0) return
 
-    registerAudioSegmentGlobal({
+    registerAudioSegment({
       id,
       source: { kind: "video", path: resolvedVideo.path },
       clipId: clipId ?? undefined,
@@ -268,17 +312,19 @@ export const Video = ({ video, style, trim, showWaveform }: VideoProps) => {
     })
 
     return () => {
-      unregisterAudioSegmentGlobal(id)
+      unregisterAudioSegment(id)
     }
   }, [
     clipId,
     clipRange,
     id,
     rawDurationFrames,
+    registerAudioSegment,
     resolvedVideo.path,
     showWaveform,
     trimEndFrames,
     trimStartFrames,
+    unregisterAudioSegment,
   ])
 
   if (isRender) {
@@ -317,10 +363,16 @@ const VideoCanvas = ({
   const isVisible = useClipActive()
   const playingFlag = useRef(false)
   const pendingSeek = useRef<number | null>(null)
-  const rawDuration = useMemo(
-    () => video_length(resolvedVideo),
-    [resolvedVideo],
-  )
+  const videoMeta = useVideoMeta(resolvedVideo)
+  const rawDuration = useMemo(() => {
+    if (videoMeta.frame_count > 0 && videoMeta.fps > 0) {
+      return Math.round(
+        (videoMeta.frame_count * PROJECT_SETTINGS.fps) / videoMeta.fps,
+      )
+    }
+    const seconds = videoMeta.duration_ms > 0 ? videoMeta.duration_ms / 1000 : 0
+    return Math.round(seconds * PROJECT_SETTINGS.fps)
+  }, [videoMeta])
   const durationFrames = Math.max(
     0,
     rawDuration - trimStartFrames - trimEndFrames,

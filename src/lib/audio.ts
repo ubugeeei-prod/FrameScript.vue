@@ -1,4 +1,5 @@
 import { PROJECT_SETTINGS } from "../../project/project"
+import { backendFetch, buildBackendUrl } from "./backend"
 
 /**
  * Audio source path.
@@ -18,9 +19,7 @@ const normalize = (src: AudioSource): { path: string } =>
   typeof src === "string" ? { path: src } : src
 
 const buildAudioUrl = (src: { path: string }) => {
-  const url = new URL("http://localhost:3000/audio")
-  url.searchParams.set("path", src.path)
-  return url.toString()
+  return buildBackendUrl("audio", { path: src.path })
 }
 
 /**
@@ -42,7 +41,7 @@ export const fetchAudioBuffer = async (
   if (cached) return cached
 
   const promise = (async () => {
-    const res = await fetch(buildAudioUrl(resolved), {
+    const res = await backendFetch(buildAudioUrl(resolved), {
       headers: {
         Range: "bytes=0-",
       },
