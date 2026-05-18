@@ -85,7 +85,7 @@ const circleVars = computed(() => {
 
 ## QuickStart
 
-(Requires Node.js)
+Requires Node.js `^20.19.0 || >=22.12.0` and npm `>=10`.
 
 ```bash
 npm init @frame-script/latest

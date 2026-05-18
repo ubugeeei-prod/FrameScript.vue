@@ -3,6 +3,11 @@
   "private": true,
   "version": "0.0.10",
   "type": "module",
+  "packageManager": "npm@11.12.1",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0",
+    "npm": ">=10"
+  },
   "scripts": {
     "dev:vite": "vite --config vite.studio.config.ts",
     "build:vite": "vite build --config vite.studio.config.ts",
