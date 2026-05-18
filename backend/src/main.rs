@@ -772,11 +772,7 @@ async fn set_audio_plan_handler(
         }
 
         let fade_in_frames = seg.fade_in_frames.unwrap_or(0).max(0).min(duration_frames);
-        let fade_out_frames = seg
-            .fade_out_frames
-            .unwrap_or(0)
-            .max(0)
-            .min(duration_frames);
+        let fade_out_frames = seg.fade_out_frames.unwrap_or(0).max(0).min(duration_frames);
         let volume = match seg.volume {
             Some(value) if value.is_finite() => value.max(0.0),
             _ => 1.0,
