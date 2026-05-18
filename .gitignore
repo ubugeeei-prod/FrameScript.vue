@@ -17,6 +17,7 @@ dist-render
 docs/.docusaurus
 docs/build
 docs/.cache
+.playwright-mcp
 
 target
 frames
