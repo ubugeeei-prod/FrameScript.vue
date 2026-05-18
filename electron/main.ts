@@ -7,6 +7,7 @@ import {
 } from "electron"
 import { spawn, ChildProcess } from "node:child_process"
 import fs from "node:fs"
+import * as os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { pathToFileURL } from "node:url"
@@ -90,6 +91,107 @@ type RenderStartPayload = {
   preset: string
   ffmpegThreads: number
   ffmpegLowMemory: boolean
+}
+
+const RENDER_PRESETS = new Set([
+  "ultrafast",
+  "superfast",
+  "veryfast",
+  "faster",
+  "fast",
+  "medium",
+  "slow",
+  "slower",
+  "veryslow",
+])
+const MAX_RENDER_WIDTH = 7680
+const MAX_RENDER_HEIGHT = 4320
+const MAX_RENDER_FPS = 240
+const MAX_RENDER_FRAMES = 1_000_000
+
+const getMaxParallelism = () =>
+  Math.max(1, Math.min(32, os.availableParallelism?.() ?? os.cpus().length))
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null
+
+function readBoundedInteger(
+  payload: Record<string, unknown>,
+  key: string,
+  min: number,
+  max: number,
+) {
+  const raw = Number(payload[key])
+  if (!Number.isFinite(raw)) {
+    throw new Error(`Invalid render payload: ${key} must be a finite number`)
+  }
+  const value = Math.round(raw)
+  if (value < min || value > max) {
+    throw new Error(
+      `Invalid render payload: ${key} must be between ${min} and ${max}`,
+    )
+  }
+  return value
+}
+
+function readBoundedNumber(
+  payload: Record<string, unknown>,
+  key: string,
+  min: number,
+  max: number,
+) {
+  const value = Number(payload[key])
+  if (!Number.isFinite(value) || value < min || value > max) {
+    throw new Error(
+      `Invalid render payload: ${key} must be between ${min} and ${max}`,
+    )
+  }
+  return value
+}
+
+function validateRenderStartPayload(payload: unknown): RenderStartPayload {
+  if (!isRecord(payload)) {
+    throw new Error("Invalid render payload")
+  }
+
+  const maxParallelism = getMaxParallelism()
+  const width = readBoundedInteger(payload, "width", 1, MAX_RENDER_WIDTH)
+  const height = readBoundedInteger(payload, "height", 1, MAX_RENDER_HEIGHT)
+  const fps = readBoundedNumber(payload, "fps", 1, MAX_RENDER_FPS)
+  const totalFrames = readBoundedInteger(
+    payload,
+    "totalFrames",
+    1,
+    MAX_RENDER_FRAMES,
+  )
+  const workers = readBoundedInteger(payload, "workers", 1, maxParallelism)
+  const ffmpegThreads = readBoundedInteger(
+    payload,
+    "ffmpegThreads",
+    1,
+    maxParallelism,
+  )
+  const encode = payload.encode
+  if (encode !== "H264" && encode !== "H265") {
+    throw new Error("Invalid render payload: encode must be H264 or H265")
+  }
+
+  const preset = typeof payload.preset === "string" ? payload.preset : ""
+  if (!RENDER_PRESETS.has(preset)) {
+    throw new Error("Invalid render payload: unsupported ffmpeg preset")
+  }
+
+  return {
+    width,
+    height,
+    fps,
+    totalFrames,
+    workers,
+    encode,
+    preset,
+    ffmpegThreads,
+    ffmpegLowMemory: Boolean(payload.ffmpegLowMemory),
+  }
 }
 
 function clearBackendHealth() {
@@ -513,32 +615,8 @@ function setupRenderIpc() {
     createRenderProgressWindow()
   })
 
-  ipcMain.handle("render:start", (_event, payload: RenderStartPayload) => {
-    const width = Number(payload.width) || 0
-    const height = Number(payload.height) || 0
-    const fps = Number(payload.fps) || 0
-    const totalFrames = Number(payload.totalFrames) || 0
-    const workers = Math.max(1, Number(payload.workers) || 1)
-    const encode = payload.encode === "H265" ? "H265" : "H264"
-    const preset = payload.preset || "medium"
-    const ffmpegThreads = Math.max(1, Number(payload.ffmpegThreads) || 1)
-    const ffmpegLowMemory = Boolean(payload.ffmpegLowMemory)
-
-    if (width <= 0 || height <= 0 || fps <= 0 || totalFrames <= 0) {
-      throw new Error("Invalid render payload")
-    }
-
-    return startRenderProcess({
-      width,
-      height,
-      fps,
-      totalFrames,
-      workers,
-      encode,
-      preset,
-      ffmpegThreads,
-      ffmpegLowMemory,
-    })
+  ipcMain.handle("render:start", (_event, payload: unknown) => {
+    return startRenderProcess(validateRenderStartPayload(payload))
   })
 }
 
