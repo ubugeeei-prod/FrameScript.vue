@@ -32,6 +32,9 @@ jobs:
       - name: Install docs dependencies
         run: npm --prefix docs ci
 
+      - name: Format check
+        run: npm run format:check
+
       - name: Typecheck
         run: npm run typecheck
 
@@ -49,6 +52,21 @@ jobs:
 
       - name: Build docs
         run: npm run docs:build
+
+      - name: Setup Rust (for smoke:backend)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo (backend)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            backend/target
+          key: ${{ runner.os }}-cargo-backend-${{ hashFiles('backend/Cargo.lock') }}
+
+      - name: Backend smoke test
+        run: npm run smoke:backend
 
   rust:
     name: Rust check
