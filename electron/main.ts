@@ -67,7 +67,22 @@ function getBackendEndpoint(pathname: string) {
 function getMediaRoots() {
   const configured = process.env.FRAMESCRIPT_MEDIA_ROOTS
   if (configured?.trim()) return configured
-  return [process.cwd(), os.homedir()].join(path.delimiter)
+
+  // Default to the project root plus a curated set of user-media folders that
+  // typically hold render inputs. Falling back to the entire $HOME makes every
+  // file under the user's account readable through the backend — set
+  // FRAMESCRIPT_MEDIA_ROOTS explicitly when a broader scope is required.
+  const home = os.homedir()
+  const curated = ["Videos", "Movies", "Music", "Pictures", "Documents"]
+    .map((dir) => path.join(home, dir))
+    .filter((dir) => {
+      try {
+        return fs.statSync(dir).isDirectory()
+      } catch {
+        return false
+      }
+    })
+  return [process.cwd(), ...curated].join(path.delimiter)
 }
 
 function getTrustedOrigins() {
