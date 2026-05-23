@@ -64,6 +64,8 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache Cargo
         uses: actions/cache@v4
@@ -76,3 +78,9 @@ jobs:
 
       - name: Check ${{ matrix.crate }}
         run: cargo check --manifest-path ${{ matrix.crate }}/Cargo.toml
+
+      - name: Clippy ${{ matrix.crate }}
+        run: cargo clippy --manifest-path ${{ matrix.crate }}/Cargo.toml --all-targets -- -D warnings
+
+      - name: Test ${{ matrix.crate }}
+        run: cargo test --manifest-path ${{ matrix.crate }}/Cargo.toml --all-targets

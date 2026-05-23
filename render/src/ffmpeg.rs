@@ -72,6 +72,7 @@ pub struct SegmentWriter {
 }
 
 impl SegmentWriter {
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         output_path: &str,
         width: u32,
