@@ -3,6 +3,7 @@ import {
   BrowserWindow,
   Menu,
   ipcMain,
+  shell,
   type IpcMainInvokeEvent,
   type MenuItemConstructorOptions,
 } from "electron"
@@ -113,6 +114,35 @@ function assertTrustedIpcSender(event: IpcMainInvokeEvent) {
     throw new Error("render IPC sender URL is unavailable")
   }
   assertTrustedUrl(senderUrl, "render IPC sender")
+}
+
+function isTrustedUrl(rawUrl: string) {
+  try {
+    assertTrustedUrl(rawUrl, "url")
+    return true
+  } catch {
+    return false
+  }
+}
+
+function hardenWindow(win: BrowserWindow) {
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (isTrustedUrl(url)) {
+      return { action: "allow" }
+    }
+    void shell.openExternal(url).catch(() => {
+      // ignore – we already refused to open it inside the app
+    })
+    return { action: "deny" }
+  })
+
+  const guardNavigation = (event: Electron.Event, url: string) => {
+    if (!isTrustedUrl(url)) {
+      event.preventDefault()
+    }
+  }
+  win.webContents.on("will-navigate", guardNavigation)
+  win.webContents.on("will-redirect", guardNavigation)
 }
 
 function getBundledBinaryEnv(): NodeJS.ProcessEnv {
@@ -564,6 +594,7 @@ async function createWindow() {
       contextIsolation: true,
     },
   })
+  hardenWindow(mainWindow)
 
   if (useDevServer && process.env.VITE_DEV_SERVER_URL) {
     assertTrustedUrl(process.env.VITE_DEV_SERVER_URL, "VITE_DEV_SERVER_URL")
@@ -603,6 +634,7 @@ function createRenderSettingsWindow() {
       sandbox: false,
     },
   })
+  hardenWindow(renderSettingsWindow)
   renderSettingsWindow.setMenu(null)
   renderSettingsWindow.setMenuBarVisibility(false)
 
@@ -641,6 +673,7 @@ function createRenderProgressWindow() {
       preload: resolveRenderPreloadPath(),
     },
   })
+  hardenWindow(renderProgressWindow)
   renderProgressWindow.setMenu(null)
   renderProgressWindow.setMenuBarVisibility(false)
 
