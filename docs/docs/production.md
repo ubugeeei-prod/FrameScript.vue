@@ -70,7 +70,7 @@ Useful overrides:
 - `FRAMESCRIPT_BACKEND_URL`, default `http://127.0.0.1:3000`
 - `FRAMESCRIPT_BACKEND_ADDR`, default `127.0.0.1:3000`
 - `FRAMESCRIPT_ALLOWED_ORIGINS`, comma-separated
-- `FRAMESCRIPT_MEDIA_ROOTS`, path-delimited allowed file roots
+- `FRAMESCRIPT_MEDIA_ROOTS`, path-delimited allowed file roots. When unset, FrameScript defaults to the project working directory plus any of `~/Videos`, `~/Movies`, `~/Music`, `~/Pictures`, `~/Documents` that exist — the full `$HOME` is **not** included by default. Pass an explicit value to broaden or narrow the scope.
 - `FRAMESCRIPT_PROJECT_ROOT`, base for relative media paths
 
 ## Render outputs
