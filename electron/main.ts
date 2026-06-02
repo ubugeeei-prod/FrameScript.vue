@@ -3,10 +3,13 @@ import {
   BrowserWindow,
   Menu,
   ipcMain,
+  type IpcMainInvokeEvent,
   type MenuItemConstructorOptions,
 } from "electron"
 import { spawn, ChildProcess } from "node:child_process"
+import { randomBytes } from "node:crypto"
 import fs from "node:fs"
+import * as os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { pathToFileURL } from "node:url"
@@ -22,6 +25,8 @@ const runMode =
   process.env.FRAMESCRIPT_RUN_MODE ?? (useDevServer ? "dev" : "bin")
 const useBinaries = runMode !== "dev"
 const APP_NAME = "FrameScript"
+const backendToken =
+  process.env.FRAMESCRIPT_BACKEND_TOKEN ?? randomBytes(32).toString("hex")
 
 if (app.name !== APP_NAME) {
   app.setName(APP_NAME)
@@ -43,10 +48,71 @@ const resolvePuppeteerExecutablePath = () => {
     if (typeof puppeteer?.executablePath === "function") {
       return puppeteer.executablePath()
     }
-  } catch (_error) {
+  } catch {
     // ignore
   }
   return null
+}
+
+function getBackendBaseUrl() {
+  const value = process.env.FRAMESCRIPT_BACKEND_URL?.trim()
+  if (value) return value.replace(/\/+$/, "")
+  return "http://127.0.0.1:3000"
+}
+
+function getBackendEndpoint(pathname: string) {
+  return `${getBackendBaseUrl()}/${pathname.replace(/^\/+/, "")}`
+}
+
+function getMediaRoots() {
+  const configured = process.env.FRAMESCRIPT_MEDIA_ROOTS
+  if (configured?.trim()) return configured
+  return [process.cwd(), os.homedir()].join(path.delimiter)
+}
+
+function getTrustedOrigins() {
+  const configured = process.env.FRAMESCRIPT_ALLOWED_ORIGINS
+  if (configured?.trim()) {
+    return configured
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean)
+  }
+  return [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
+    "file://",
+    "null",
+  ]
+}
+
+function getBackendRuntimeEnv(): NodeJS.ProcessEnv {
+  return {
+    FRAMESCRIPT_BACKEND_TOKEN: backendToken,
+    FRAMESCRIPT_BACKEND_URL: getBackendBaseUrl(),
+    FRAMESCRIPT_ALLOWED_ORIGINS: getTrustedOrigins().join(","),
+    FRAMESCRIPT_PROJECT_ROOT: process.cwd(),
+    FRAMESCRIPT_MEDIA_ROOTS: getMediaRoots(),
+  }
+}
+
+function assertTrustedUrl(rawUrl: string, label: string) {
+  const parsed = new URL(rawUrl)
+  if (parsed.protocol === "file:") return
+  const trusted = getTrustedOrigins()
+  if (!trusted.includes(parsed.origin)) {
+    throw new Error(`${label} is not a trusted FrameScript origin: ${rawUrl}`)
+  }
+}
+
+function assertTrustedIpcSender(event: IpcMainInvokeEvent) {
+  const senderUrl = event.senderFrame?.url ?? event.sender.getURL()
+  if (!senderUrl) {
+    throw new Error("render IPC sender URL is unavailable")
+  }
+  assertTrustedUrl(senderUrl, "render IPC sender")
 }
 
 function getBundledBinaryEnv(): NodeJS.ProcessEnv {
@@ -92,6 +158,111 @@ type RenderStartPayload = {
   ffmpegLowMemory: boolean
 }
 
+const RENDER_PRESETS = new Set([
+  "ultrafast",
+  "superfast",
+  "veryfast",
+  "faster",
+  "fast",
+  "medium",
+  "slow",
+  "slower",
+  "veryslow",
+])
+const MAX_RENDER_WIDTH = 7680
+const MAX_RENDER_HEIGHT = 4320
+const MAX_RENDER_FPS = 240
+const MAX_RENDER_FRAMES = 1_000_000
+
+const getMaxParallelism = () =>
+  Math.max(1, Math.min(32, os.availableParallelism?.() ?? os.cpus().length))
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null
+
+function readBoundedInteger(
+  payload: Record<string, unknown>,
+  key: string,
+  min: number,
+  max: number,
+) {
+  const raw = Number(payload[key])
+  if (!Number.isFinite(raw)) {
+    throw new Error(`Invalid render payload: ${key} must be a finite number`)
+  }
+  const value = Math.round(raw)
+  if (value < min || value > max) {
+    throw new Error(
+      `Invalid render payload: ${key} must be between ${min} and ${max}`,
+    )
+  }
+  return value
+}
+
+function readBoundedNumber(
+  payload: Record<string, unknown>,
+  key: string,
+  min: number,
+  max: number,
+) {
+  const value = Number(payload[key])
+  if (!Number.isFinite(value) || value < min || value > max) {
+    throw new Error(
+      `Invalid render payload: ${key} must be between ${min} and ${max}`,
+    )
+  }
+  return value
+}
+
+function validateRenderStartPayload(payload: unknown): RenderStartPayload {
+  if (!isRecord(payload)) {
+    throw new Error("Invalid render payload")
+  }
+
+  const maxParallelism = getMaxParallelism()
+  const width = readBoundedInteger(payload, "width", 1, MAX_RENDER_WIDTH)
+  const height = readBoundedInteger(payload, "height", 1, MAX_RENDER_HEIGHT)
+  const fps = readBoundedNumber(payload, "fps", 1, MAX_RENDER_FPS)
+  const totalFrames = readBoundedInteger(
+    payload,
+    "totalFrames",
+    1,
+    MAX_RENDER_FRAMES,
+  )
+  const workers = readBoundedInteger(payload, "workers", 1, maxParallelism)
+  const ffmpegThreads = readBoundedInteger(
+    payload,
+    "ffmpegThreads",
+    1,
+    maxParallelism,
+  )
+  const encode = payload.encode
+  if (encode !== "H264" && encode !== "H265") {
+    throw new Error("Invalid render payload: encode must be H264 or H265")
+  }
+
+  const preset = typeof payload.preset === "string" ? payload.preset : ""
+  if (!RENDER_PRESETS.has(preset)) {
+    throw new Error("Invalid render payload: unsupported ffmpeg preset")
+  }
+
+  return {
+    width,
+    height,
+    fps,
+    totalFrames,
+    workers,
+    encode,
+    preset,
+    ffmpegThreads,
+    ffmpegLowMemory: Boolean(payload.ffmpegLowMemory),
+  }
+}
+
+function clearBackendHealth() {
+  backendHealthyPromise = null
+}
+
 function getPlatformKey() {
   if (process.platform === "linux" && process.arch === "x64")
     return "linux-x86_64"
@@ -118,9 +289,15 @@ function getBackendBinaryPath() {
 }
 
 function getRenderPageUrl() {
-  if (process.env.RENDER_PAGE_URL) return process.env.RENDER_PAGE_URL
+  if (process.env.RENDER_PAGE_URL) {
+    assertTrustedUrl(process.env.RENDER_PAGE_URL, "RENDER_PAGE_URL")
+    return process.env.RENDER_PAGE_URL
+  }
   if (useDevServer) {
-    return process.env.RENDER_DEV_SERVER_URL ?? "http://localhost:5174/render"
+    const renderUrl =
+      process.env.RENDER_DEV_SERVER_URL ?? "http://localhost:5174/render"
+    assertTrustedUrl(renderUrl, "RENDER_DEV_SERVER_URL")
+    return renderUrl
   }
   const htmlPath = path.join(process.cwd(), "dist-render", "render.html")
   return pathToFileURL(htmlPath).toString()
@@ -154,6 +331,7 @@ function startBackend(): Promise<void> {
       env: {
         ...process.env,
         ...getBundledBinaryEnv(),
+        ...getBackendRuntimeEnv(),
       },
     })
 
@@ -172,6 +350,7 @@ function startBackend(): Promise<void> {
       env: {
         ...process.env,
         ...getBundledBinaryEnv(),
+        ...getBackendRuntimeEnv(),
       },
     })
 
@@ -186,9 +365,15 @@ function startBackend(): Promise<void> {
     console.error("[backend stderr]", data.toString())
   })
 
+  backendProcess.on("error", (error) => {
+    console.error("[backend error]", error)
+    clearBackendHealth()
+  })
+
   backendProcess.on("exit", (code, signal) => {
     console.log(`[backend exited] code=${code} signal=${signal}`)
     backendProcess = null
+    clearBackendHealth()
   })
 
   return Promise.resolve()
@@ -204,13 +389,12 @@ function stopBackend() {
 async function waitForHealthz(): Promise<void> {
   if (backendHealthyPromise) return backendHealthyPromise
 
-  const healthUrl = "http://127.0.0.1:3000/healthz"
+  const healthUrl = getBackendEndpoint("healthz")
   backendHealthyPromise = new Promise((resolve, reject) => {
     const started = Date.now()
     const timeoutMs = 15_000
     const intervalMs = 300
-
-    const timer = setInterval(() => {
+    const timer: NodeJS.Timeout = setInterval(() => {
       fetch(healthUrl)
         .then((res) => {
           if (res.ok) {
@@ -224,6 +408,7 @@ async function waitForHealthz(): Promise<void> {
 
       if (Date.now() - started > timeoutMs) {
         clearInterval(timer)
+        clearBackendHealth()
         reject(new Error("healthz timeout"))
       }
     }, intervalMs)
@@ -234,6 +419,7 @@ async function waitForHealthz(): Promise<void> {
 
 function resolveRenderSettingsUrl() {
   if (useDevServer && process.env.VITE_DEV_SERVER_URL) {
+    assertTrustedUrl(process.env.VITE_DEV_SERVER_URL, "VITE_DEV_SERVER_URL")
     return `${process.env.VITE_DEV_SERVER_URL}/#/render-settings`
   }
 
@@ -244,6 +430,7 @@ function resolveRenderSettingsUrl() {
 function resolveRenderProgressUrl() {
   const outputParam = encodeURIComponent(getRenderOutputDisplayPath())
   if (useDevServer && process.env.VITE_DEV_SERVER_URL) {
+    assertTrustedUrl(process.env.VITE_DEV_SERVER_URL, "VITE_DEV_SERVER_URL")
     return `${process.env.VITE_DEV_SERVER_URL}/#/render-progress?output=${outputParam}`
   }
 
@@ -299,6 +486,7 @@ function startRenderProcess(payload: RenderStartPayload) {
         env: {
           ...process.env,
           ...getBundledBinaryEnv(),
+          ...getBackendRuntimeEnv(),
           RENDER_PAGE_URL: getRenderPageUrl(),
           RENDER_OUTPUT_PATH: getRenderOutputPath(),
         },
@@ -338,6 +526,7 @@ function startRenderProcess(payload: RenderStartPayload) {
         env: {
           ...process.env,
           ...getBundledBinaryEnv(),
+          ...getBackendRuntimeEnv(),
           RENDER_PAGE_URL: getRenderPageUrl(),
           RENDER_OUTPUT_PATH: getRenderOutputPath(),
         },
@@ -377,6 +566,7 @@ async function createWindow() {
   })
 
   if (useDevServer && process.env.VITE_DEV_SERVER_URL) {
+    assertTrustedUrl(process.env.VITE_DEV_SERVER_URL, "VITE_DEV_SERVER_URL")
     await mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL)
     //mainWindow.webContents.openDevTools();
   } else {
@@ -467,7 +657,8 @@ function createRenderProgressWindow() {
 }
 
 function setupRenderIpc() {
-  ipcMain.handle("render:getPlatform", () => {
+  ipcMain.handle("render:getPlatform", (event) => {
+    assertTrustedIpcSender(event)
     if (!useBinaries) {
       const renderDir = path.join(process.cwd(), "render")
       return {
@@ -486,43 +677,30 @@ function setupRenderIpc() {
     }
   })
 
-  ipcMain.handle("render:getOutputPath", () => {
+  ipcMain.handle("render:getOutputPath", (event) => {
+    assertTrustedIpcSender(event)
     return {
       path: getRenderOutputPath(),
       displayPath: getRenderOutputDisplayPath(),
     }
   })
 
-  ipcMain.handle("render:openProgress", () => {
+  ipcMain.handle("render:getBackendConfig", (event) => {
+    assertTrustedIpcSender(event)
+    return {
+      baseUrl: getBackendBaseUrl(),
+      token: backendToken,
+    }
+  })
+
+  ipcMain.handle("render:openProgress", (event) => {
+    assertTrustedIpcSender(event)
     createRenderProgressWindow()
   })
 
-  ipcMain.handle("render:start", (_event, payload: RenderStartPayload) => {
-    const width = Number(payload.width) || 0
-    const height = Number(payload.height) || 0
-    const fps = Number(payload.fps) || 0
-    const totalFrames = Number(payload.totalFrames) || 0
-    const workers = Math.max(1, Number(payload.workers) || 1)
-    const encode = payload.encode === "H265" ? "H265" : "H264"
-    const preset = payload.preset || "medium"
-    const ffmpegThreads = Math.max(1, Number(payload.ffmpegThreads) || 1)
-    const ffmpegLowMemory = Boolean(payload.ffmpegLowMemory)
-
-    if (width <= 0 || height <= 0 || fps <= 0 || totalFrames <= 0) {
-      throw new Error("Invalid render payload")
-    }
-
-    return startRenderProcess({
-      width,
-      height,
-      fps,
-      totalFrames,
-      workers,
-      encode,
-      preset,
-      ffmpegThreads,
-      ffmpegLowMemory,
-    })
+  ipcMain.handle("render:start", (event, payload: unknown) => {
+    assertTrustedIpcSender(event)
+    return startRenderProcess(validateRenderStartPayload(payload))
   })
 }
 

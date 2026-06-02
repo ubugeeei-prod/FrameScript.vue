@@ -1,7 +1,7 @@
+pub(crate) mod bin;
+pub(crate) mod command;
 pub mod hw_decoder;
 pub mod sw_decoder;
-pub(crate) mod command;
-pub(crate) mod bin;
 
 use serde::Deserialize;
 use std::process::Command;
@@ -115,7 +115,9 @@ pub fn probe_video_duration_ms(path: &str) -> Result<u64, String> {
         .as_ref()
         .and_then(|format| parse_duration_seconds(format.duration.as_deref()));
 
-    let seconds = stream_duration.or(format_duration).ok_or_else(|| "failed to read duration".to_string())?;
+    let seconds = stream_duration
+        .or(format_duration)
+        .ok_or_else(|| "failed to read duration".to_string())?;
     Ok((seconds * 1000.0).round().max(0.0) as u64)
 }
 
@@ -136,16 +138,18 @@ pub fn probe_video_frames(path: &str) -> Result<u64, String> {
         .nb_read_frames
         .as_deref()
         .and_then(|value| value.parse::<u64>().ok())
+        && frames > 0
     {
-        if frames > 0 {
-            return Ok(frames);
-        }
+        return Ok(frames);
     }
 
-    if let Some(frames) = stream.nb_frames.as_deref().and_then(|value| value.parse::<u64>().ok()) {
-        if frames > 0 {
-            return Ok(frames);
-        }
+    if let Some(frames) = stream
+        .nb_frames
+        .as_deref()
+        .and_then(|value| value.parse::<u64>().ok())
+        && frames > 0
+    {
+        return Ok(frames);
     }
 
     let duration = parse_duration_seconds(stream.duration.as_deref());
@@ -158,7 +162,12 @@ pub fn probe_video_frames(path: &str) -> Result<u64, String> {
 }
 
 pub fn probe_video_fps(path: &str) -> Result<f64, String> {
-    let output = run_ffprobe(path, Some("v:0"), "stream=avg_frame_rate,r_frame_rate", false)?;
+    let output = run_ffprobe(
+        path,
+        Some("v:0"),
+        "stream=avg_frame_rate,r_frame_rate",
+        false,
+    )?;
     let stream = output
         .streams
         .as_ref()

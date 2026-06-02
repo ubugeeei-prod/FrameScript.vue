@@ -5,39 +5,42 @@ sidebar_position: 2
 
 ## 基本構成
 
-プロジェクトは `project/project.tsx` にあります。
-ここに記述することで動画を構築・編集します。
+動画は `project/project.vue` に記述します。
+`project/project.tsx` は FrameScript Studio とレンダラへ SFC を渡すための互換ラッパーです。
 
-`project.tsx`の最小構成の例は以下のとおりです。
+```vue
+<script setup lang="ts">
+import { Clip, Project, TimeLine, Video } from "../src/lib/vue"
+</script>
+
+<template>
+  <Project>
+    <TimeLine>
+      <Clip label="Clip Name">
+        <Video video="~/Videos/example.mp4" />
+      </Clip>
+    </TimeLine>
+  </Project>
+</template>
+```
+
+プロジェクト設定は、FrameScript のコアモジュールがビルド時に読むため `project/project.tsx` に残します。
 
 ```tsx
-import { Clip } from "../src/lib/clip"
-import { Project, type ProjectSettings } from "../src/lib/project"
-import { TimeLine } from "../src/lib/timeline"
-import { Video } from "../src/lib/video/video"
+import { VueProjectRoot } from "../src/lib/vue"
+import type { ProjectSettings } from "../src/lib/project"
+import ProjectVue from "./project.vue"
 
-// プロジェクトの設定
 export const PROJECT_SETTINGS: ProjectSettings = {
-  name: "framescript-minimal",
+  name: "framescript-vue-template",
   width: 1920,
   height: 1080,
   fps: 60,
 }
 
-// プロジェクトの定義
-// ここに要素を付け足していくことで動画を構築する
 export const PROJECT = () => {
   return (
-    <Project>
-      <TimeLine>
-        {/* <Clip> はタイムラインに表示される要素 */}
-        {/* タイムライン上の長さは <Video/> の長さを自動で反映する（指定も可能） */}
-        <Clip label="Clip Name">
-          {/* <Video/> は動画を読み込む */}
-          <Video video={{ path: "~/Videos/example.mp4" }} />
-        </Clip>
-      </TimeLine>
-    </Project>
+    <VueProjectRoot component={ProjectVue} projectSettings={PROJECT_SETTINGS} />
   )
 }
 ```

@@ -1,5 +1,11 @@
 /// <reference types="vite/client" />
 
+declare module "*.vue" {
+  import type { DefineComponent } from "vue"
+  const component: DefineComponent<Record<string, never>, Record<string, never>>
+  export default component
+}
+
 type RenderStartPayload = {
   width: number
   height: number
@@ -21,6 +27,7 @@ interface Window {
       isDev?: boolean
     }>
     getOutputPath: () => Promise<{ path: string; displayPath?: string }>
+    getBackendConfig: () => Promise<{ baseUrl: string; token: string }>
     startRender: (
       payload: RenderStartPayload,
     ) => Promise<{ cmd: string; pid: number | undefined }>

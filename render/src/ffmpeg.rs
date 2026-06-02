@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     error::Error,
-    io,
+    fs as std_fs, io,
     path::{Path, PathBuf},
     process::Stdio,
     sync::{Mutex, OnceLock},
@@ -33,25 +33,37 @@ fn resolve_ffmpeg_path() -> Result<String, Box<dyn Error>> {
         return Ok(path.clone());
     }
 
+    if let Some(path) = read_env_path("FRAMESCRIPT_FFMPEG_PATH") {
+        validate_ffmpeg_binary(&path)?;
+        eprintln!("[render] selected ffmpeg binary: {path}");
+        *cached = Some(path.clone());
+        return Ok(path);
+    }
+
     match std::process::Command::new("ffmpeg")
         .arg("-version")
         .output()
     {
         Ok(_) => {
             let path = "ffmpeg".to_string();
+            eprintln!("[render] selected ffmpeg binary: {path}");
             *cached = Some(path.clone());
             Ok(path)
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            if let Some(path) = read_env_path("FRAMESCRIPT_FFMPEG_PATH") {
-                *cached = Some(path.clone());
-                Ok(path)
-            } else {
-                Err("ffmpeg not found on PATH and FRAMESCRIPT_FFMPEG_PATH is not set".into())
-            }
+            Err("ffmpeg not found on PATH and FRAMESCRIPT_FFMPEG_PATH is not set".into())
         }
         Err(error) => Err(format!("failed to run ffmpeg: {error}").into()),
     }
+}
+
+fn validate_ffmpeg_binary(path: &str) -> Result<(), Box<dyn Error>> {
+    let metadata = std_fs::metadata(path)?;
+    if !metadata.is_file() {
+        return Err(format!("ffmpeg binary path is not a file: {path}").into());
+    }
+    std::process::Command::new(path).arg("-version").output()?;
+    Ok(())
 }
 
 pub struct SegmentWriter {
@@ -171,6 +183,11 @@ impl SegmentWriter {
             return Err(format!("ffmpeg exited with status: {}", status).into());
         }
         Ok(())
+    }
+
+    pub async fn abort(mut self) {
+        let _ = self.child.kill().await;
+        let _ = self.child.wait().await;
     }
 }
 

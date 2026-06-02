@@ -6,6 +6,7 @@ import React, {
   useSyncExternalStore,
 } from "react"
 import { PROJECT_SETTINGS } from "../../project/project"
+import { registerFrameScriptApi } from "./frame-script-bridge"
 
 type FrameStore = {
   get: () => number
@@ -50,7 +51,7 @@ const FrameUpdatesEnabledContext: React.Context<boolean> = (() => {
   return created
 })()
 
-const createFrameStore = (initialFrame = 0): FrameStore => {
+export const createFrameStore = (initialFrame = 0): FrameStore => {
   let currentFrame = Math.max(0, Math.floor(initialFrame))
   const listeners = new Set<() => void>()
 
@@ -156,21 +157,10 @@ export const WithCurrentFrame: React.FC<{ children: React.ReactNode }> = ({
 
   useEffect(() => {
     // Expose setters for headless rendering / automation (e.g., Chromium driving frames)
-    const api = {
+    return registerFrameScriptApi({
       setFrame: (frame: number) => store.set(frame),
       getFrame: () => store.get(),
-    }
-    ;(window as any).__frameScript = {
-      ...(window as any).__frameScript,
-      setFrame: api.setFrame,
-      getFrame: api.getFrame,
-    }
-    return () => {
-      if ((window as any).__frameScript) {
-        delete (window as any).__frameScript.setFrame
-        delete (window as any).__frameScript.getFrame
-      }
-    }
+    })
   }, [store])
 
   const value = useMemo(() => store, [store])

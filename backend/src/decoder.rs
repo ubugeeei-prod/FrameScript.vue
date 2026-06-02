@@ -16,7 +16,7 @@ use crate::{
 };
 use tracing::warn;
 
-pub static DECODER: LazyLock<Decoder> = LazyLock::new(|| Decoder::new());
+pub static DECODER: LazyLock<Decoder> = LazyLock::new(Decoder::new);
 static FPS_CACHE: LazyLock<Mutex<HashMap<String, f64>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -179,6 +179,9 @@ impl CachedDecoder {
 
         tokio::spawn(async move {
             loop {
+                if self_clone.inner.closed.load(Ordering::Relaxed) {
+                    break;
+                }
                 if ENTIRE_CACHE_SIZE.load(Ordering::Relaxed)
                     >= MAX_CACHE_SIZE.load(Ordering::Relaxed)
                 {
@@ -231,10 +234,7 @@ impl CachedDecoder {
     pub async fn get_frame(&self, frame_index: u32) -> Arc<Vec<u8>> {
         let future = {
             let mut frames = self.inner.frames.write().unwrap();
-            frames
-                .entry(frame_index)
-                .or_insert_with(|| SharedManualFuture::new())
-                .clone()
+            frames.entry(frame_index).or_default().clone()
         };
 
         if let Some(frame) = future.get_now() {
@@ -330,10 +330,10 @@ impl CachedDecoder {
                 }
                 if let Some(drop_index) = drop_index {
                     let removed = self.inner.frames.write().unwrap().remove(&drop_index);
-                    if let Some(future) = removed {
-                        if let Some(cached) = future.get_now() {
-                            ENTIRE_CACHE_SIZE.fetch_sub(cached.len(), Ordering::Relaxed);
-                        }
+                    if let Some(future) = removed
+                        && let Some(cached) = future.get_now()
+                    {
+                        ENTIRE_CACHE_SIZE.fetch_sub(cached.len(), Ordering::Relaxed);
                     }
                 }
             }
@@ -342,8 +342,32 @@ impl CachedDecoder {
     }
 
     fn close(&self) {
-        self.inner.closed.store(true, Ordering::Relaxed);
+        if self.inner.closed.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        self.clear_cached_frames();
         self.inner.stream_notify.notify_one();
+    }
+
+    fn clear_cached_frames(&self) {
+        {
+            let mut pending = self.inner.pending_frames.lock().unwrap();
+            pending.clear();
+        }
+        {
+            let mut recent = self.inner.recent_frames.lock().unwrap();
+            recent.clear();
+        }
+        {
+            let mut pinned = self.inner.pinned_frame.lock().unwrap();
+            *pinned = None;
+        }
+        let mut frames = self.inner.frames.write().unwrap();
+        for future in frames.drain().map(|(_, future)| future) {
+            if let Some(cached) = future.get_now() {
+                ENTIRE_CACHE_SIZE.fetch_sub(cached.len(), Ordering::Relaxed);
+            }
+        }
     }
 }
 
@@ -520,10 +544,9 @@ async fn run_stream_loop(inner: Arc<Inner>) {
             if let Some(min_pending) = {
                 let pending = inner.pending_frames.lock().unwrap();
                 pending.iter().next().cloned()
-            } {
-                if min_pending < current_frame {
-                    break;
-                }
+            } && min_pending < current_frame
+            {
+                break;
             }
 
             let frame = match stream_ref.read_next().await {
@@ -581,11 +604,11 @@ async fn run_stream_loop(inner: Arc<Inner>) {
                     frames.get(&current_frame).cloned()
                 };
 
-                if let Some(future) = future {
-                    if !future.is_completed() {
-                        ENTIRE_CACHE_SIZE.fetch_add(frame.len(), Ordering::Relaxed);
-                        future.complete(Arc::new(frame)).await;
-                    }
+                if let Some(future) = future
+                    && !future.is_completed()
+                {
+                    ENTIRE_CACHE_SIZE.fetch_add(frame.len(), Ordering::Relaxed);
+                    future.complete(Arc::new(frame)).await;
                 }
             }
 

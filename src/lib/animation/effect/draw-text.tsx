@@ -11,6 +11,8 @@ import opentype, { type Font } from "opentype.js"
 import { useCurrentFrame } from "../../frame"
 import { useProvideClipDuration } from "../../clip"
 import type { Variable } from "../../animation"
+import { buildBackendUrl } from "../../backend"
+import { registerFrameScriptApi } from "../../frame-script-bridge"
 import "mathjax-full/es5/tex-svg"
 
 /**
@@ -457,11 +459,10 @@ const installDrawTextApi = () => {
     }
   }
 
-  ;(window as any).__frameScript = {
-    ...(window as any).__frameScript,
+  registerFrameScriptApi({
     waitDrawTextReady,
     getDrawTextPending: () => tracker.pending,
-  }
+  })
 }
 
 if (typeof window !== "undefined") {
@@ -469,9 +470,7 @@ if (typeof window !== "undefined") {
 }
 
 const buildFontUrl = (path: string) => {
-  const url = new URL("http://localhost:3000/file")
-  url.searchParams.set("path", path)
-  return url.toString()
+  return buildBackendUrl("file", { path })
 }
 
 const resolveFontUrl = (url: string) => {

@@ -1,6 +1,9 @@
 pub mod ffmpeg;
 
-use std::time::{Duration, Instant};
+use std::{
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
 
 use chromiumoxide::{
     Browser, Handler, Page, cdp::browser_protocol::page::CaptureScreenshotFormat,
@@ -9,9 +12,8 @@ use chromiumoxide::{
 use futures::{StreamExt, stream::FuturesUnordered};
 
 use chromiumoxide::browser::BrowserConfig;
-use reqwest::Client;
+use reqwest::{Client, RequestBuilder};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -29,7 +31,36 @@ struct CancelResponse {
 }
 
 static CHROMIUM_EXECUTABLE: OnceLock<Option<PathBuf>> = OnceLock::new();
-const FRAME_DIRECTORY: &str = "frames";
+
+struct TempWorkspace {
+    path: PathBuf,
+}
+
+impl TempWorkspace {
+    fn create() -> Result<Self, Box<dyn std::error::Error>> {
+        let base = std::env::temp_dir();
+        let path = base.join(format!(
+            "framescript-render-{}-{}",
+            std::process::id(),
+            chrono_like_timestamp()
+        ));
+        std::fs::create_dir_all(&path)?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for TempWorkspace {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+fn chrono_like_timestamp() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
+}
 
 fn parse_bool_token(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
@@ -37,6 +68,52 @@ fn parse_bool_token(value: &str) -> Option<bool> {
         "0" | "false" | "no" | "off" => Some(false),
         _ => None,
     }
+}
+
+fn backend_base_url() -> String {
+    std::env::var("FRAMESCRIPT_BACKEND_URL")
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "http://127.0.0.1:3000".to_string())
+}
+
+fn backend_endpoint(path: &str) -> String {
+    format!("{}/{}", backend_base_url(), path.trim_start_matches('/'))
+}
+
+fn with_backend_auth(request: RequestBuilder) -> RequestBuilder {
+    match std::env::var("FRAMESCRIPT_BACKEND_TOKEN") {
+        Ok(token) if !token.trim().is_empty() => request.header("x-framescript-token", token),
+        _ => request,
+    }
+}
+
+async fn backend_post_json<T: Serialize + ?Sized>(
+    client: &Client,
+    url: &str,
+    payload: &T,
+) -> Result<(), reqwest::Error> {
+    with_backend_auth(client.post(url).json(payload))
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
+async fn backend_post_empty(client: &Client, url: &str) -> Result<(), reqwest::Error> {
+    with_backend_auth(client.post(url))
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
+async fn backend_get(client: &Client, url: &str) -> Result<reqwest::Response, reqwest::Error> {
+    with_backend_auth(client.get(url))
+        .send()
+        .await?
+        .error_for_status()
 }
 
 fn resolve_chromium_executable() -> Option<PathBuf> {
@@ -91,6 +168,39 @@ async fn spawn_browser_instance(
 
     let (browser, handler) = Browser::launch(config).await?;
     Ok((browser, handler))
+}
+
+async fn promote_output(
+    working_output: &Path,
+    output_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if working_output == output_path {
+        return Ok(());
+    }
+
+    if let Some(parent) = output_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
+    let output_name = output_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("output.mp4");
+    let promote_path = output_path.with_file_name(format!(
+        ".{output_name}.framescript-{}.tmp",
+        std::process::id()
+    ));
+    tokio::fs::remove_file(&promote_path).await.ok();
+
+    if let Err(err) = tokio::fs::rename(working_output, &promote_path).await {
+        eprintln!("[render] temp rename failed ({err}), falling back to copy");
+        tokio::fs::copy(working_output, &promote_path).await?;
+        tokio::fs::remove_file(working_output).await.ok();
+    }
+
+    tokio::fs::remove_file(output_path).await.ok();
+    tokio::fs::rename(&promote_path, output_path).await?;
+    Ok(())
 }
 
 async fn wait_for_next_frame(page: &Page) {
@@ -169,6 +279,18 @@ async fn wait_for_audio_waveforms_ready(page: &Page) {
           const api = window.__frameScript;
           if (api && typeof api.waitAudioWaveformsReady === "function") {
             await api.waitAudioWaveformsReady();
+          }
+        })()
+    "#;
+    page.evaluate(script).await.unwrap();
+}
+
+async fn wait_for_media_metadata_ready(page: &Page) {
+    let script = r#"
+        (async () => {
+          const api = window.__frameScript;
+          if (api && typeof api.waitMediaMetadataReady === "function") {
+            await api.waitMediaMetadataReady();
           }
         })()
     "#;
@@ -272,19 +394,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let base_chunk = total_frames / worker_count;
     let remainder = total_frames % worker_count;
     let progress_url = std::env::var("RENDER_PROGRESS_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:3000/render_progress".to_string());
+        .unwrap_or_else(|_| backend_endpoint("render_progress"));
     let progress_client = Client::new();
+    let reset_url = std::env::var("RENDER_RESET_URL").unwrap_or_else(|_| backend_endpoint("reset"));
+    let _ = backend_post_empty(&progress_client, &reset_url).await;
     let completed = Arc::new(AtomicUsize::new(0));
     let total_frames_usize = total_frames;
 
-    let cancel_url = std::env::var("RENDER_CANCEL_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:3000/is_canceled".to_string());
+    let cancel_url =
+        std::env::var("RENDER_CANCEL_URL").unwrap_or_else(|_| backend_endpoint("is_canceled"));
     let is_canceled = Arc::new(AtomicBool::new(false));
     let is_canceled_clone = is_canceled.clone();
     tokio::spawn(async move {
         loop {
             let client = Client::new();
-            let is_canceled = match client.get(&cancel_url).send().await {
+            let is_canceled = match backend_get(&client, &cancel_url).await {
                 Ok(resp) => match resp.json::<CancelResponse>().await {
                     Ok(body) => body.canceled,
                     Err(_) => false,
@@ -302,14 +426,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // initialize progress
-    let _ = progress_client
-        .post(&progress_url)
-        .json(&ProgressPayload {
+    let _ = backend_post_json(
+        &progress_client,
+        &progress_url,
+        &ProgressPayload {
             completed: 0,
             total: total_frames_usize,
-        })
-        .send()
-        .await;
+        },
+    )
+    .await;
 
     // share progress
     let progress_url_clone = progress_url.clone();
@@ -317,14 +442,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let is_canceled_clone = is_canceled.clone();
     tokio::spawn(async move {
         loop {
-            let _ = Client::new()
-                .post(&progress_url_clone)
-                .json(&ProgressPayload {
+            let client = Client::new();
+            let _ = backend_post_json(
+                &client,
+                &progress_url_clone,
+                &ProgressPayload {
                     completed: completed_clone.load(Ordering::Relaxed),
                     total: total_frames,
-                })
-                .send()
-                .await;
+                },
+            )
+            .await;
 
             if is_canceled_clone.load(Ordering::Relaxed) {
                 break;
@@ -348,8 +475,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("RENDER_OUTPUT_PATH").unwrap_or_else(|_| "output.mp4".to_string());
     let output_path = PathBuf::from(output_path);
 
-    tokio::fs::remove_dir_all(FRAME_DIRECTORY).await.ok();
-    tokio::fs::create_dir(FRAME_DIRECTORY).await?;
+    let workspace = TempWorkspace::create()?;
+    let frame_directory = workspace.path.clone();
+    tokio::fs::create_dir_all(frame_directory.join("profiles")).await?;
 
     let start = Instant::now();
 
@@ -377,13 +505,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ffmpeg_low_memory_clone = ffmpeg_low_memory;
 
         let page_url = url.clone();
+        let frame_directory = frame_directory.clone();
         let completed_clone = completed.clone();
         let is_canceled_clone = is_canceled.clone();
         tasks.push(tokio::spawn(async move {
-            let profile_dir = PathBuf::from(format!(
-                "{}/profiles/profile-{:03}",
-                FRAME_DIRECTORY, worker_id
-            ));
+            let profile_dir = frame_directory
+                .join("profiles")
+                .join(format!("profile-{worker_id:03}"));
 
             let (mut browser, mut handler) = spawn_browser_instance(profile_dir, width, height)
                 .await
@@ -391,10 +519,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             tokio::spawn(async move { while handler.next().await.is_some() {} });
 
-            let out = format!("{}/segment-{worker_id:03}.mp4", FRAME_DIRECTORY);
+            let out = frame_directory.join(format!("segment-{worker_id:03}.mp4"));
+            let out_string = out.to_string_lossy().into_owned();
 
             let mut writer = SegmentWriter::new(
-                &out,
+                &out_string,
                 width,
                 height,
                 fps,
@@ -419,12 +548,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|error| format!("worker {worker_id}: navigation failed: {error}"))?;
             wait_for_frame_api(&page).await;
             wait_for_animation_ready(&page).await;
+            wait_for_media_metadata_ready(&page).await;
             wait_for_draw_text_ready(&page).await;
             wait_for_audio_waveforms_ready(&page).await;
             wait_for_psd_ready(&page).await;
             wait_for_webgl_ready(&page).await;
 
             for frame in start..end {
+                if is_canceled_clone.load(Ordering::Relaxed) {
+                    writer.abort().await;
+                    let _ = browser.close().await;
+                    return Err("render canceled".to_string());
+                }
+
                 wait_for_next_frame(&page).await;
 
                 let js = format!(
@@ -486,7 +622,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 completed_clone.fetch_add(1, Ordering::Relaxed);
 
                 if is_canceled_clone.load(Ordering::Relaxed) {
-                    break;
+                    writer.abort().await;
+                    let _ = browser.close().await;
+                    return Err("render canceled".to_string());
                 }
             }
 
@@ -516,26 +654,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    if is_canceled.load(Ordering::Relaxed) {
+        return Err("render canceled".into());
+    }
+
     let mut segs = Vec::new();
 
     for worker_id in launched_worker_ids {
-        let path = PathBuf::from(format!("{}/segment-{worker_id:03}.mp4", FRAME_DIRECTORY));
+        let path = frame_directory.join(format!("segment-{worker_id:03}.mp4"));
         if tokio::fs::metadata(&path).await.is_ok() {
             segs.push(path);
         }
     }
 
-    let working_output = PathBuf::from("frames/output.mp4");
+    let working_output = frame_directory.join("output.mp4");
     crate::ffmpeg::concat_segments_mp4(segs, &working_output).await?;
 
     let audio_plan_url = std::env::var("RENDER_AUDIO_PLAN_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:3000/render_audio_plan".to_string());
-    if let Ok(resp) = Client::new().get(&audio_plan_url).send().await {
+        .unwrap_or_else(|_| backend_endpoint("render_audio_plan"));
+    let audio_plan_client = Client::new();
+    if let Ok(resp) = backend_get(&audio_plan_client, &audio_plan_url).await {
         if resp.status().is_success() {
             if let Ok(plan) = resp.json::<AudioPlanResolved>().await {
                 if !plan.segments.is_empty() {
                     let input_video = working_output.clone();
-                    let temp_video = PathBuf::from("frames/output.audio.mp4");
+                    let temp_video = frame_directory.join("output.audio.mp4");
                     mux_audio_plan_into_mp4(&input_video, &temp_video, &plan, total_frames, fps)
                         .await?;
                     tokio::fs::remove_file(&input_video).await.ok();
@@ -545,32 +688,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    if output_path != working_output {
-        if let Some(parent) = output_path.parent() {
-            tokio::fs::create_dir_all(parent).await.ok();
-        }
-        tokio::fs::remove_file(&output_path).await.ok();
-        if let Err(err) = tokio::fs::rename(&working_output, &output_path).await {
-            eprintln!("[render] rename failed ({}), falling back to copy", err);
-            if tokio::fs::copy(&working_output, &output_path).await.is_ok() {
-                tokio::fs::remove_file(&working_output).await.ok();
-            }
-        }
+    if is_canceled.load(Ordering::Relaxed) {
+        return Err("render canceled".into());
     }
 
+    promote_output(&working_output, &output_path).await?;
+
     let final_completed = completed.load(Ordering::Relaxed);
-    let _ = progress_client
-        .post(&progress_url)
-        .json(&ProgressPayload {
+    let _ = backend_post_json(
+        &progress_client,
+        &progress_url,
+        &ProgressPayload {
             completed: final_completed,
             total: total_frames_usize,
-        })
-        .send()
-        .await;
+        },
+    )
+    .await;
 
-    let reset_url = std::env::var("RENDER_RESET_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:3000/reset".to_string());
-    let _ = progress_client.post(&reset_url).send().await;
+    let _ = backend_post_empty(&progress_client, &reset_url).await;
 
     println!("TOTAL : {}[ms]", start.elapsed().as_millis());
 

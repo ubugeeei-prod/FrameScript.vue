@@ -1,4 +1,6 @@
 import React from "react"
+import { AudioPlanProvider } from "./audio-plan"
+import { TimelineStoreProvider } from "./timeline"
 
 /**
  * Project settings applied to rendering and timeline.
@@ -35,15 +37,19 @@ type ProjectProps = {
  */
 export const Project = ({ children }: ProjectProps) => {
   return (
-    <div
-      style={{
-        position: "relative",
-        width: "100%",
-        height: "100%",
-        overflow: "hidden",
-      }}
-    >
-      {children}
-    </div>
+    <TimelineStoreProvider>
+      <AudioPlanProvider>
+        <div
+          style={{
+            position: "relative",
+            width: "100%",
+            height: "100%",
+            overflow: "hidden",
+          }}
+        >
+          {children}
+        </div>
+      </AudioPlanProvider>
+    </TimelineStoreProvider>
   )
 }

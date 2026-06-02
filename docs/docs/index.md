@@ -3,8 +3,8 @@ title: FrameScript Docs
 sidebar_position: 1
 ---
 
-FrameScript is a code-first motion graphics and video editing toolkit built with React and CSS.
-You author scenes as React components, preview them in Studio, and render video through headless Chromium.
+FrameScript.vue is a code-first motion graphics and video editing toolkit built for Vue SFC and CSS.
+You author scenes in `.vue` files, preview them in Studio, and render video through headless Chromium.
 
 ## Quick start
 
@@ -40,4 +40,6 @@ FrameScript Studio should launch.
 
 ### Edit the project
 
-Your project lives in `project/project.tsx`.
+Your main editable Vue project lives in `project/project.vue`. The `project/project.tsx` file is the React/FrameScript entrypoint that mounts the Vue project and is available for advanced integration.
+
+For production builds and render troubleshooting, see the [Production Runbook](./production.md).

@@ -1,12 +1,13 @@
 pub mod decoder;
 pub mod ffmpeg;
 pub mod future;
+pub mod security;
 pub mod util;
 
 use std::{
     net::SocketAddr,
     ops::Bound,
-    sync::atomic::AtomicBool,
+    sync::{Arc, atomic::AtomicBool},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -37,7 +38,7 @@ use crate::{
         probe_audio_duration_ms, probe_video_dimensions, probe_video_duration_ms, probe_video_fps,
         probe_video_frames,
     },
-    util::resolve_path_to_string,
+    security::SecurityConfig,
 };
 
 #[derive(Deserialize)]
@@ -56,7 +57,9 @@ struct FileQuery {
 }
 
 #[derive(Clone)]
-struct AppState;
+struct AppState {
+    security: Arc<SecurityConfig>,
+}
 
 #[derive(Deserialize, Debug)]
 struct FrameRequest {
@@ -187,7 +190,9 @@ async fn main() {
 
     tracing_subscriber::fmt::init();
 
-    let app_state = AppState;
+    let app_state = AppState {
+        security: Arc::new(SecurityConfig::from_env()),
+    };
     let app = Router::new()
         .route("/ws", get(ws_handler))
         .route("/video", get(video_handler).options(options_handler))
@@ -235,7 +240,10 @@ async fn main() {
         .route("/healthz", get(healthz_handler).options(options_handler))
         .with_state(app_state);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    let addr = std::env::var("FRAMESCRIPT_BACKEND_ADDR")
+        .ok()
+        .and_then(|value| value.parse::<SocketAddr>().ok())
+        .unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 3000)));
     let listener = TcpListener::bind(addr).await.unwrap();
     info!("listening on {addr}");
     println!("[backend ready] listening on {addr}");
@@ -243,16 +251,26 @@ async fn main() {
     serve(listener, app).await.unwrap();
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+async fn ws_handler(
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, StatusCode> {
+    state.security.authorize_origin(&headers)?;
+    Ok(ws.on_upgrade(move |socket| handle_socket(socket, state)))
 }
 
 async fn video_handler(
-    State(_state): State<AppState>,
+    request_headers: HeaderMap,
+    State(state): State<AppState>,
     Query(VideoQuery { path }): Query<VideoQuery>,
     range: Option<TypedHeader<Range>>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let resolved_path = resolve_path_to_string(&path).map_err(|_| StatusCode::BAD_REQUEST)?;
+    state.security.authorize_media(&request_headers)?;
+    let resolved_path = state
+        .security
+        .resolve_media_path(&path)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
     let mut file = tokio::fs::File::open(&resolved_path)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
@@ -309,36 +327,37 @@ async fn video_handler(
     let mut resp = axum::response::Response::new(axum::body::Body::from_stream(body));
     *resp.status_mut() = status;
 
-    let headers = resp.headers_mut();
-    headers.insert(
-        header::ACCEPT_RANGES,
-        header::HeaderValue::from_static("bytes"),
-    );
-    if let Ok(v) = header::HeaderValue::from_str(&content_length.to_string()) {
-        headers.insert(header::CONTENT_LENGTH, v);
+    let response_headers = resp.headers_mut();
+    response_headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    if let Ok(v) = HeaderValue::from_str(&content_length.to_string()) {
+        response_headers.insert(header::CONTENT_LENGTH, v);
     }
-    headers.insert(
-        header::CONTENT_TYPE,
-        header::HeaderValue::from_static("video/mp4"),
-    );
+    response_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("video/mp4"));
     if let Some(range_str) = content_range {
-        headers.insert(
+        response_headers.insert(
             header::CONTENT_RANGE,
-            header::HeaderValue::from_str(&range_str)
-                .unwrap_or_else(|_| header::HeaderValue::from_static("bytes */*")),
+            HeaderValue::from_str(&range_str)
+                .unwrap_or_else(|_| HeaderValue::from_static("bytes */*")),
         );
     }
-    apply_cors(headers);
+    state
+        .security
+        .apply_cors(&request_headers, response_headers);
 
     Ok(resp)
 }
 
 async fn audio_handler(
-    State(_state): State<AppState>,
+    request_headers: HeaderMap,
+    State(state): State<AppState>,
     Query(AudioQuery { path }): Query<AudioQuery>,
     range: Option<TypedHeader<Range>>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let resolved_path = resolve_path_to_string(&path).map_err(|_| StatusCode::BAD_REQUEST)?;
+    state.security.authorize_media(&request_headers)?;
+    let resolved_path = state
+        .security
+        .resolve_media_path(&path)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
     let mut file = tokio::fs::File::open(&resolved_path)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
@@ -395,52 +414,72 @@ async fn audio_handler(
     let mut resp = axum::response::Response::new(axum::body::Body::from_stream(body));
     *resp.status_mut() = status;
 
-    let headers = resp.headers_mut();
-    headers.insert(
-        header::ACCEPT_RANGES,
-        header::HeaderValue::from_static("bytes"),
-    );
-    if let Ok(v) = header::HeaderValue::from_str(&content_length.to_string()) {
-        headers.insert(header::CONTENT_LENGTH, v);
+    let response_headers = resp.headers_mut();
+    response_headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    if let Ok(v) = HeaderValue::from_str(&content_length.to_string()) {
+        response_headers.insert(header::CONTENT_LENGTH, v);
     }
-    headers.insert(
-        header::CONTENT_TYPE,
-        header::HeaderValue::from_static("audio/mp4"),
-    );
+    response_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("audio/mp4"));
     if let Some(range_str) = content_range {
-        headers.insert(
+        response_headers.insert(
             header::CONTENT_RANGE,
-            header::HeaderValue::from_str(&range_str)
-                .unwrap_or_else(|_| header::HeaderValue::from_static("bytes */*")),
+            HeaderValue::from_str(&range_str)
+                .unwrap_or_else(|_| HeaderValue::from_static("bytes */*")),
         );
     }
-    apply_cors(headers);
+    state
+        .security
+        .apply_cors(&request_headers, response_headers);
 
     Ok(resp)
 }
 
-fn cors_status(status: StatusCode) -> axum::response::Response {
+fn cors_status(
+    security: &SecurityConfig,
+    request_headers: &HeaderMap,
+    status: StatusCode,
+) -> axum::response::Response {
     let mut resp = axum::response::Response::new(axum::body::Body::empty());
     *resp.status_mut() = status;
-    apply_cors(resp.headers_mut());
+    security.apply_cors(request_headers, resp.headers_mut());
     resp
 }
 
 async fn file_handler(
-    State(_state): State<AppState>,
+    request_headers: HeaderMap,
+    State(state): State<AppState>,
     Query(FileQuery { path }): Query<FileQuery>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let resolved_path = match resolve_path_to_string(&path) {
+    state.security.authorize_media(&request_headers)?;
+    let resolved_path = match state.security.resolve_media_path(&path) {
         Ok(value) => value,
-        Err(_) => return Ok(cors_status(StatusCode::BAD_REQUEST)),
+        Err(_) => {
+            return Ok(cors_status(
+                &state.security,
+                &request_headers,
+                StatusCode::BAD_REQUEST,
+            ));
+        }
     };
     let file = match tokio::fs::File::open(&resolved_path).await {
         Ok(value) => value,
-        Err(_) => return Ok(cors_status(StatusCode::NOT_FOUND)),
+        Err(_) => {
+            return Ok(cors_status(
+                &state.security,
+                &request_headers,
+                StatusCode::NOT_FOUND,
+            ));
+        }
     };
     let metadata = match file.metadata().await {
         Ok(value) => value,
-        Err(_) => return Ok(cors_status(StatusCode::INTERNAL_SERVER_ERROR)),
+        Err(_) => {
+            return Ok(cors_status(
+                &state.security,
+                &request_headers,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ));
+        }
     };
     let len = metadata.len();
 
@@ -448,22 +487,27 @@ async fn file_handler(
     let mut resp = axum::response::Response::new(axum::body::Body::from_stream(stream));
     *resp.status_mut() = StatusCode::OK;
 
-    let headers = resp.headers_mut();
-    headers.insert(
+    let response_headers = resp.headers_mut();
+    response_headers.insert(
         header::CONTENT_TYPE,
-        header::HeaderValue::from_static("application/octet-stream"),
+        HeaderValue::from_static("application/octet-stream"),
     );
-    if let Ok(v) = header::HeaderValue::from_str(&len.to_string()) {
-        headers.insert(header::CONTENT_LENGTH, v);
+    if let Ok(v) = HeaderValue::from_str(&len.to_string()) {
+        response_headers.insert(header::CONTENT_LENGTH, v);
     }
-    apply_cors(headers);
+    state
+        .security
+        .apply_cors(&request_headers, response_headers);
 
     Ok(resp)
 }
 
-async fn healthz_handler() -> impl IntoResponse {
+async fn healthz_handler(
+    request_headers: HeaderMap,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
     let mut headers = HeaderMap::new();
-    apply_cors(&mut headers);
+    state.security.apply_cors(&request_headers, &mut headers);
     (headers, StatusCode::OK)
 }
 
@@ -477,10 +521,15 @@ struct VideoMetadataResponse {
 }
 
 async fn video_meta_handler(
-    State(_state): State<AppState>,
+    request_headers: HeaderMap,
+    State(state): State<AppState>,
     Query(VideoQuery { path }): Query<VideoQuery>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let resolved_path = resolve_path_to_string(&path).map_err(|_| StatusCode::BAD_REQUEST)?;
+    state.security.authorize_media(&request_headers)?;
+    let resolved_path = state
+        .security
+        .resolve_media_path(&path)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
     let duration_ms =
         probe_video_duration_ms(&resolved_path).map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -497,7 +546,9 @@ async fn video_meta_handler(
         height,
     })
     .into_response();
-    apply_cors(resp.headers_mut());
+    state
+        .security
+        .apply_cors(&request_headers, resp.headers_mut());
     Ok(resp)
 }
 
@@ -507,19 +558,26 @@ struct AudioMetadataResponse {
 }
 
 async fn audio_meta_handler(
-    State(_state): State<AppState>,
+    request_headers: HeaderMap,
+    State(state): State<AppState>,
     Query(AudioQuery { path }): Query<AudioQuery>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let resolved_path = resolve_path_to_string(&path).map_err(|_| StatusCode::BAD_REQUEST)?;
+    state.security.authorize_media(&request_headers)?;
+    let resolved_path = state
+        .security
+        .resolve_media_path(&path)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
     let duration_ms =
         probe_audio_duration_ms(&resolved_path).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let mut resp = Json(AudioMetadataResponse { duration_ms }).into_response();
-    apply_cors(resp.headers_mut());
+    state
+        .security
+        .apply_cors(&request_headers, resp.headers_mut());
     Ok(resp)
 }
 
-async fn handle_socket(mut socket: WebSocket, _state: AppState) {
+async fn handle_socket(mut socket: WebSocket, state: AppState) {
     let session_id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed) as u64;
     info!("client connected");
 
@@ -546,7 +604,10 @@ async fn handle_socket(mut socket: WebSocket, _state: AppState) {
                 let height = req.height;
                 let target_frame = req.frame;
 
-                let path = resolve_path_to_string(&req.video).unwrap_or_default();
+                let path = state
+                    .security
+                    .resolve_media_path(&req.video)
+                    .unwrap_or_default();
 
                 let decoder = DECODER
                     .cached_decoder(DecoderKey {
@@ -588,32 +649,43 @@ async fn handle_socket(mut socket: WebSocket, _state: AppState) {
     info!("client disconnected");
 }
 
-async fn options_handler() -> impl IntoResponse {
+async fn options_handler(
+    request_headers: HeaderMap,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
     let mut headers = HeaderMap::new();
-    apply_cors(&mut headers);
+    state.security.apply_cors(&request_headers, &mut headers);
     (headers, StatusCode::NO_CONTENT)
 }
 
 async fn set_cache_size_handler(
-    State(_state): State<AppState>,
+    request_headers: HeaderMap,
+    State(state): State<AppState>,
     Json(payload): Json<CacheSizeRequest>,
 ) -> impl IntoResponse {
     let mut headers = HeaderMap::new();
-    apply_cors(&mut headers);
+    state.security.apply_cors(&request_headers, &mut headers);
+    if let Err(status) = state.security.authorize_capability(&request_headers) {
+        return (headers, status);
+    }
 
-    let gib = payload.gib.max(1).min(128); // clamp to a sane range
-    let bytes = gib as usize * 1024 * 1024 * 1024;
+    let gib = payload.gib.clamp(1, 128);
+    let bytes = gib * 1024 * 1024 * 1024;
     set_max_cache_size(bytes);
 
     (headers, StatusCode::OK)
 }
 
 async fn set_progress_handler(
-    State(_state): State<AppState>,
+    request_headers: HeaderMap,
+    State(state): State<AppState>,
     Json(payload): Json<ProgressRequest>,
 ) -> impl IntoResponse {
     let mut headers = HeaderMap::new();
-    apply_cors(&mut headers);
+    state.security.apply_cors(&request_headers, &mut headers);
+    if let Err(status) = state.security.authorize_capability(&request_headers) {
+        return (headers, status);
+    }
 
     if let Some(total) = payload.total {
         RENDER_TOTAL.store(total, Ordering::Relaxed);
@@ -628,16 +700,22 @@ async fn set_progress_handler(
     (headers, StatusCode::OK)
 }
 
-async fn get_progress_handler(State(_state): State<AppState>) -> impl IntoResponse {
+async fn get_progress_handler(
+    request_headers: HeaderMap,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
     let mut headers = HeaderMap::new();
-    apply_cors(&mut headers);
+    state.security.apply_cors(&request_headers, &mut headers);
+    if let Err(status) = state.security.authorize_capability(&request_headers) {
+        return (headers, status).into_response();
+    }
 
     let response = ProgressResponse {
         completed: RENDER_COMPLETED.load(Ordering::Relaxed),
         total: RENDER_TOTAL.load(Ordering::Relaxed),
     };
 
-    (headers, Json(response))
+    (headers, Json(response)).into_response()
 }
 
 fn now_ms() -> u64 {
@@ -648,11 +726,15 @@ fn now_ms() -> u64 {
 }
 
 async fn render_log_handler(
-    State(_state): State<AppState>,
+    request_headers: HeaderMap,
+    State(state): State<AppState>,
     Json(payload): Json<RenderLogRequest>,
 ) -> impl IntoResponse {
     let mut headers = HeaderMap::new();
-    apply_cors(&mut headers);
+    state.security.apply_cors(&request_headers, &mut headers);
+    if let Err(status) = state.security.authorize_capability(&request_headers) {
+        return (headers, status);
+    }
 
     let entry = RenderLogEntry {
         timestamp_ms: now_ms(),
@@ -685,31 +767,55 @@ async fn render_log_handler(
     (headers, StatusCode::OK)
 }
 
-async fn get_render_log_handler(State(_state): State<AppState>) -> impl IntoResponse {
+async fn get_render_log_handler(
+    request_headers: HeaderMap,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
     let mut headers = HeaderMap::new();
-    apply_cors(&mut headers);
+    state.security.apply_cors(&request_headers, &mut headers);
+    if let Err(status) = state.security.authorize_capability(&request_headers) {
+        return (headers, status).into_response();
+    }
 
     let logs = RENDER_LOGS.lock().unwrap().clone();
-    (headers, Json(logs))
+    (headers, Json(logs)).into_response()
 }
 
-async fn render_cancel_handler(State(_state): State<AppState>) -> impl IntoResponse {
+async fn render_cancel_handler(
+    request_headers: HeaderMap,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
     let mut headers = HeaderMap::new();
-    apply_cors(&mut headers);
+    state.security.apply_cors(&request_headers, &mut headers);
+    if let Err(status) = state.security.authorize_capability(&request_headers) {
+        return (headers, status);
+    }
     RENDER_CANCEL.store(true, Ordering::Relaxed);
     (headers, StatusCode::OK)
 }
 
-async fn is_canceled_handler(State(_state): State<AppState>) -> impl IntoResponse {
+async fn is_canceled_handler(
+    request_headers: HeaderMap,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
     let mut headers = HeaderMap::new();
-    apply_cors(&mut headers);
+    state.security.apply_cors(&request_headers, &mut headers);
+    if let Err(status) = state.security.authorize_capability(&request_headers) {
+        return (headers, status).into_response();
+    }
     let canceled = RENDER_CANCEL.load(Ordering::Relaxed);
-    (headers, Json(serde_json::json!({ "canceled": canceled })))
+    (headers, Json(serde_json::json!({ "canceled": canceled }))).into_response()
 }
 
-async fn reset_handler(State(_state): State<AppState>) -> impl IntoResponse {
+async fn reset_handler(
+    request_headers: HeaderMap,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
     let mut headers = HeaderMap::new();
-    apply_cors(&mut headers);
+    state.security.apply_cors(&request_headers, &mut headers);
+    if let Err(status) = state.security.authorize_capability(&request_headers) {
+        return (headers, status);
+    }
     DECODER.clear().await;
     RENDER_CANCEL.store(false, Ordering::Relaxed);
     *RENDER_AUDIO_PLAN.lock().unwrap() = None;
@@ -718,11 +824,15 @@ async fn reset_handler(State(_state): State<AppState>) -> impl IntoResponse {
 }
 
 async fn set_audio_plan_handler(
-    State(_state): State<AppState>,
+    request_headers: HeaderMap,
+    State(state): State<AppState>,
     Json(payload): Json<AudioPlanRequest>,
 ) -> impl IntoResponse {
     let mut headers = HeaderMap::new();
-    apply_cors(&mut headers);
+    state.security.apply_cors(&request_headers, &mut headers);
+    if let Err(status) = state.security.authorize_capability(&request_headers) {
+        return (headers, status);
+    }
 
     let fps = if payload.fps.is_finite() && payload.fps > 0.0 {
         payload.fps
@@ -741,10 +851,14 @@ async fn set_audio_plan_handler(
         let source_start_frame = seg.source_start_frame.max(0);
 
         let resolved_source = match seg.source {
-            AudioSourceRef::Video { path } => resolve_path_to_string(&path)
+            AudioSourceRef::Video { path } => state
+                .security
+                .resolve_media_path(&path)
                 .ok()
                 .map(|p| AudioSourceResolved::Video { path: p }),
-            AudioSourceRef::Sound { path } => resolve_path_to_string(&path)
+            AudioSourceRef::Sound { path } => state
+                .security
+                .resolve_media_path(&path)
                 .ok()
                 .map(|p| AudioSourceResolved::Sound { path: p }),
         };
@@ -772,11 +886,7 @@ async fn set_audio_plan_handler(
         }
 
         let fade_in_frames = seg.fade_in_frames.unwrap_or(0).max(0).min(duration_frames);
-        let fade_out_frames = seg
-            .fade_out_frames
-            .unwrap_or(0)
-            .max(0)
-            .min(duration_frames);
+        let fade_out_frames = seg.fade_out_frames.unwrap_or(0).max(0).min(duration_frames);
         let volume = match seg.volume {
             Some(value) if value.is_finite() => value.max(0.0),
             _ => 1.0,
@@ -803,9 +913,15 @@ async fn set_audio_plan_handler(
     (headers, StatusCode::OK)
 }
 
-async fn get_audio_plan_handler(State(_state): State<AppState>) -> impl IntoResponse {
+async fn get_audio_plan_handler(
+    request_headers: HeaderMap,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
     let mut headers = HeaderMap::new();
-    apply_cors(&mut headers);
+    state.security.apply_cors(&request_headers, &mut headers);
+    if let Err(status) = state.security.authorize_capability(&request_headers) {
+        return (headers, status).into_response();
+    }
 
     let plan = RENDER_AUDIO_PLAN
         .lock()
@@ -817,20 +933,5 @@ async fn get_audio_plan_handler(State(_state): State<AppState>) -> impl IntoResp
             loudness: None,
         });
 
-    (headers, Json(plan))
-}
-
-fn apply_cors(headers: &mut HeaderMap) {
-    headers.insert(
-        header::ACCESS_CONTROL_ALLOW_ORIGIN,
-        HeaderValue::from_static("*"),
-    );
-    headers.insert(
-        header::ACCESS_CONTROL_ALLOW_METHODS,
-        HeaderValue::from_static("GET, OPTIONS, POST"),
-    );
-    headers.insert(
-        header::ACCESS_CONTROL_ALLOW_HEADERS,
-        HeaderValue::from_static("*"),
-    );
+    (headers, Json(plan)).into_response()
 }

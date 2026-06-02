@@ -7,14 +7,13 @@ import {
   useClipRange,
   useProvideClipDuration,
 } from "../clip"
-import {
-  registerAudioSegmentGlobal,
-  unregisterAudioSegmentGlobal,
-} from "../audio-plan"
+import { useAudioPlanRegistration } from "../audio-plan"
 import { fetchAudioBuffer } from "../audio"
 import { useIsPlaying, useIsRender } from "../studio-state"
 import type { Trim } from "../trim"
 import { resolveTrimFrames } from "../trim"
+import { backendFetch, buildBackendUrl } from "../backend"
+import { trackMediaMetadataPromise } from "../media-metadata"
 
 /**
  * Sound source descriptor.
@@ -65,9 +64,7 @@ export const normalizeSound = (sound: Sound | string): Sound => {
 }
 
 const buildMetaUrl = (sound: Sound) => {
-  const url = new URL("http://localhost:3000/audio/meta")
-  url.searchParams.set("path", sound.path)
-  return url.toString()
+  return buildBackendUrl("audio/meta", { path: sound.path })
 }
 
 const soundLengthCache = new Map<string, number>()
@@ -91,34 +88,7 @@ export const sound_length = (sound: Sound | string): number => {
     return soundLengthCache.get(resolved.path)!
   }
 
-  try {
-    const xhr = new XMLHttpRequest()
-    xhr.open("GET", buildMetaUrl(resolved), false) // 同期リクエストで初期ロード用途
-    xhr.send()
-
-    if (xhr.status >= 200 && xhr.status < 300) {
-      const payload = JSON.parse(xhr.responseText) as { duration_ms?: number }
-      const rawMs =
-        typeof payload.duration_ms === "number" ? payload.duration_ms : 0
-      if (
-        !Number.isFinite(rawMs) ||
-        rawMs <= 0 ||
-        rawMs > MAX_REASONABLE_DURATION_MS
-      ) {
-        return 0
-      }
-      const seconds = rawMs / 1000
-      const frames = Math.round(seconds * PROJECT_SETTINGS.fps)
-      if (frames > 0) {
-        soundLengthCache.set(resolved.path, frames)
-      }
-      return frames
-    }
-  } catch (error) {
-    console.error("sound_length(): failed to fetch metadata", error)
-  }
-
-  soundLengthCache.set(resolved.path, 0)
+  void fetchSoundLengthAsync(resolved)
   return 0
 }
 
@@ -131,9 +101,8 @@ const fetchSoundLengthAsync = async (sound: Sound): Promise<number> => {
 
   const next = (async () => {
     try {
-      const res = await fetch(buildMetaUrl(sound))
+      const res = await backendFetch(buildMetaUrl(sound))
       if (!res.ok) {
-        soundLengthCache.set(sound.path, 0)
         return 0
       }
       const payload = (await res.json()) as { duration_ms?: number }
@@ -144,7 +113,6 @@ const fetchSoundLengthAsync = async (sound: Sound): Promise<number> => {
         rawMs <= 0 ||
         rawMs > MAX_REASONABLE_DURATION_MS
       ) {
-        soundLengthCache.set(sound.path, 0)
         return 0
       }
       const seconds = rawMs / 1000
@@ -154,15 +122,15 @@ const fetchSoundLengthAsync = async (sound: Sound): Promise<number> => {
       return resolvedFrames
     } catch (error) {
       console.error("fetchSoundLengthAsync(): failed to fetch metadata", error)
-      soundLengthCache.set(sound.path, 0)
       return 0
     } finally {
       soundLengthPending.delete(sound.path)
     }
   })()
 
-  soundLengthPending.set(sound.path, next)
-  return next
+  const tracked = trackMediaMetadataPromise(next)
+  soundLengthPending.set(sound.path, tracked)
+  return tracked
 }
 
 const useSoundLengthFrames = (sound: Sound, syncMode: boolean) => {
@@ -215,6 +183,8 @@ export const Sound = ({
   showWaveform,
 }: SoundProps) => {
   const id = useId()
+  const { registerAudioSegment, unregisterAudioSegment } =
+    useAudioPlanRegistration()
   const clipId = useClipId()
   const clipRange = useClipRange()
   const isActive = useClipActive()
@@ -391,7 +361,7 @@ export const Sound = ({
 
     const fadeIn = Math.max(0, Math.round(fadeInFrames))
     const fadeOut = Math.max(0, Math.round(fadeOutFrames))
-    registerAudioSegmentGlobal({
+    registerAudioSegment({
       id,
       source: { kind: "sound", path: resolvedSound.path },
       clipId: clipId ?? undefined,
@@ -405,7 +375,7 @@ export const Sound = ({
     })
 
     return () => {
-      unregisterAudioSegmentGlobal(id)
+      unregisterAudioSegment(id)
     }
   }, [
     clipRange,
@@ -414,10 +384,12 @@ export const Sound = ({
     fadeInFrames,
     fadeOutFrames,
     id,
+    registerAudioSegment,
     normalizedVolume,
     resolvedSound.path,
     showWaveform,
     trimStartFrames,
+    unregisterAudioSegment,
   ])
 
   useEffect(() => {

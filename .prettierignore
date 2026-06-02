@@ -6,6 +6,7 @@ frames
 bin
 docs/build
 docs/.docusaurus
+.playwright-mcp
 output.mp4
 output.gif
 output_youtube.mp4
