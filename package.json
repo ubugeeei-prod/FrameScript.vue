@@ -76,5 +76,14 @@
     "vite": "^7.2.4",
     "vitest": "^4.1.6",
     "wait-on": "^9.0.3"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ubugeeei-prod/FrameScript.vue.git"
+  },
+  "homepage": "https://github.com/ubugeeei-prod/FrameScript.vue",
+  "bugs": {
+    "url": "https://github.com/ubugeeei-prod/FrameScript.vue/issues"
+  },
+  "license": "MIT License"
 }
