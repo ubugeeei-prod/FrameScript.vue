@@ -126,10 +126,10 @@ fn resolve_chromium_executable() -> Option<PathBuf> {
                 .filter(|value| !value.is_empty())
                 .map(PathBuf::from);
 
-            if let Some(path) = path {
-                if path.is_file() {
-                    return Some(path);
-                }
+            if let Some(path) = path
+                && path.is_file()
+            {
+                return Some(path);
             }
             None
         })
@@ -673,19 +673,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let audio_plan_url = std::env::var("RENDER_AUDIO_PLAN_URL")
         .unwrap_or_else(|_| backend_endpoint("render_audio_plan"));
     let audio_plan_client = Client::new();
-    if let Ok(resp) = backend_get(&audio_plan_client, &audio_plan_url).await {
-        if resp.status().is_success() {
-            if let Ok(plan) = resp.json::<AudioPlanResolved>().await {
-                if !plan.segments.is_empty() {
-                    let input_video = working_output.clone();
-                    let temp_video = frame_directory.join("output.audio.mp4");
-                    mux_audio_plan_into_mp4(&input_video, &temp_video, &plan, total_frames, fps)
-                        .await?;
-                    tokio::fs::remove_file(&input_video).await.ok();
-                    tokio::fs::rename(&temp_video, &input_video).await?;
-                }
-            }
-        }
+    if let Ok(resp) = backend_get(&audio_plan_client, &audio_plan_url).await
+        && resp.status().is_success()
+        && let Ok(plan) = resp.json::<AudioPlanResolved>().await
+        && !plan.segments.is_empty()
+    {
+        let input_video = working_output.clone();
+        let temp_video = frame_directory.join("output.audio.mp4");
+        mux_audio_plan_into_mp4(&input_video, &temp_video, &plan, total_frames, fps).await?;
+        tokio::fs::remove_file(&input_video).await.ok();
+        tokio::fs::rename(&temp_video, &input_video).await?;
     }
 
     if is_canceled.load(Ordering::Relaxed) {
